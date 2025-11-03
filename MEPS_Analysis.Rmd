@@ -1,0 +1,2384 @@
+---
+title: "AMS597_Project"
+author: "Junsung Rhee, Keun Young Yoon, Dhananjay Sharma, Parth Pidadi"
+date: "2025-04-14"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    fig_width: 8
+    fig_height: 6
+    fig_caption: true
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Introduction
+
+This document contains the analysis of two separate research questions:
+
+1. **Research Question 1:** Identifying which components of medical expenditure most significantly contribute to individuals’ total annual healthcare spending.
+2. **Research Question 2:** Examining the association between demographic factors and chronic disease prevalence.
+3. **Research Question 3:** Exploring the relationship between lifestyle factors, health behaviors, and psychological distress through multiple analytical approaches.
+
+
+Each section uses the same original dataset but focuses on different variables and analytical methods.
+
+### Loading Required packages for all the research questions
+
+```{r}
+# Load necessary packages
+library(dplyr)
+library(caret)
+library(xgboost)
+library(car)
+library(readr)
+library(ggplot2)
+library(gridExtra)
+library(corrplot)
+library(tidyr)
+library(scales)
+library(corrplot)
+library(pROC)
+library(randomForest)
+library(ggcorrplot)
+library(broom)
+library(cowplot)
+library(factoextra)
+library(cluster)
+library(haven)    # For reading SAS7BDAT files
+library(reshape2)
+library(tibble)
+```
+
+
+### Data Cleaning and Storing in MEPS_Filtered
+
+```{r}
+# Read the SAS7BDAT data file with the correct extension
+meps_data <- read_sas("h224.sas7bdat")
+
+# Select only the columns we need
+selected_columns <- c(
+  "DUPERSID", "FCSZ1231", "REGION20", "AGE20X", "DOBYY", "SEX", 
+  "RACEV2X", "MARRY20X", "EDUCYR", "HIBPDX", "CHDDX", "MIDX", 
+  "STRKDX", "CHBRON53", "CHOLDX", "CANCERDX", "DIABDX_M18", 
+  "JTPAIN53_M18", "ARTHDX", "NOSMOK42", "PHYEXE53", "OFTSMK53", 
+  "K6SUM42", "ADSLEEP42", "ADKALC42", "ADNUMDRK42", "FAMINC20", 
+  "POVLEV20", "INSCOV20", "INSURC20", "MCARE20X", "TOTTCH20", 
+  "TOTEXP20", "OBDEXP20", "OPTEXP20", "ERDEXP20", "RXEXP20", "IPDEXP20"
+)
+
+# Check if all columns exist in the dataset
+missing_cols <- selected_columns[!selected_columns %in% names(meps_data)]
+if(length(missing_cols) > 0) {
+  warning(paste("The following columns are not found in the dataset:", 
+                paste(missing_cols, collapse=", ")))
+  # Continue with only the columns that exist
+  selected_columns <- selected_columns[selected_columns %in% names(meps_data)]
+}
+
+# Select only the specified columns
+filtered_data <- meps_data %>% dplyr::select(all_of(selected_columns))
+
+# Remove rows with missing values
+# This will remove rows where ANY of the selected variables have missing values
+filtered_data_complete <- filtered_data %>% na.omit()
+
+# Print summary of data filtering
+cat("Original number of rows:", nrow(meps_data), "\n")
+cat("Number of rows after filtering out missing values:", nrow(filtered_data_complete), "\n")
+cat("Number of rows removed:", nrow(meps_data) - nrow(filtered_data_complete), "\n")
+
+# Write the filtered data to CSV
+write.csv(filtered_data_complete, "MEPS_Filtered.csv", row.names = FALSE)
+
+cat("Filtered data has been saved to MEPS_Filtered.csv\n")
+```
+
+
+----------------------------------------------------------------------------------------------------
+
+### MEPS Dataset Exploratory Data Analysis
+
+
+```{r}
+# Read the data
+meps_data <- read.csv("MEPS_Filtered.csv")
+
+# Let's first look at the structure of the data
+str(meps_data)
+summary(meps_data)
+```
+
+
+### 1. DEMOGRAPHIC ANALYSIS
+
+```{r}
+# Age distribution
+age_plot <- ggplot(meps_data, aes(x = AGE20X)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white", alpha = 0.7) +
+  labs(title = "Age Distribution", x = "Age", y = "Count") +
+  theme_minimal()
+
+# Sex distribution
+sex_plot <- ggplot(meps_data, aes(x = factor(SEX), fill = factor(SEX))) +
+  geom_bar() +
+  scale_fill_manual(values = c("1" = "#0072B2", "2" = "#D55E00"),
+                   labels = c("1" = "Male", "2" = "Female")) +
+  labs(title = "Gender Distribution", x = "Gender", y = "Count", fill = "Gender") +
+  scale_x_discrete(labels = c("1" = "Male", "2" = "Female")) +
+  theme_minimal()
+
+# Region distribution
+region_plot <- ggplot(meps_data, aes(x = factor(REGION20), fill = factor(REGION20))) +
+  geom_bar() +
+  scale_fill_brewer(palette = "Set2", 
+                   labels = c("-1" = "Inapplicable", "1" = "Northeast", 
+                              "2" = "Midwest", "3" = "South", "4" = "West")) +
+  labs(title = "Regional Distribution", x = "Region", y = "Count", fill = "Region") +
+  scale_x_discrete(labels = c("-1" = "Inapplicable", "1" = "Northeast", 
+                              "2" = "Midwest", "3" = "South", "4" = "West")) +
+  theme_minimal()
+
+# Race distribution
+race_plot <- ggplot(meps_data, aes(x = factor(RACEV2X), fill = factor(RACEV2X))) +
+  geom_bar() +
+  scale_fill_brewer(palette = "Set3") +
+  labs(title = "Race Distribution", x = "Race", y = "Count", fill = "Race") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Marital status distribution
+marital_plot <- ggplot(meps_data, aes(x = factor(MARRY20X), fill = factor(MARRY20X))) +
+  geom_bar() +
+  scale_fill_brewer(palette = "Set1",
+                   labels = c("-8" = "DK", "-7" = "Refused", "1" = "Married", 
+                              "2" = "Widowed", "3" = "Divorced", 
+                              "4" = "Separated", "5" = "Never Married", 
+                              "6" = "Under age 16")) +
+  labs(title = "Marital Status Distribution", x = "Marital Status", y = "Count", fill = "Status") +
+  scale_x_discrete(labels = c("-8" = "DK", "-7" = "Refused", "1" = "Married", 
+                              "2" = "Widowed", "3" = "Divorced", 
+                              "4" = "Separated", "5" = "Never Married", 
+                              "6" = "Under age 16")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Education level distribution
+education_plot <- ggplot(meps_data, aes(x = factor(EDUCYR), fill = factor(EDUCYR))) +
+  geom_bar() +
+  labs(title = "Education Level Distribution", x = "Years of Education", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+# Display demographic plots
+grid.arrange(age_plot, sex_plot, region_plot, ncol = 2)
+grid.arrange(race_plot, marital_plot, education_plot, ncol = 2)
+```
+
+
+### 2. HEALTH CONDITIONS ANALYSIS
+
+```{r}
+# Create a dataframe for health conditions
+health_conditions <- meps_data %>%
+  select(HIBPDX, CHDDX, MIDX, STRKDX, CHBRON53, CHOLDX, CANCERDX, DIABDX_M18, JTPAIN53_M18, ARTHDX) %>%
+  gather(key = "condition", value = "status") %>%
+  filter(status == 1) %>%  # Only 'Yes' responses
+  group_by(condition) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+
+# Plot health conditions prevalence
+ggplot(health_conditions, aes(x = reorder(condition, count), y = count, fill = condition)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Prevalence of Health Conditions", x = "Health Condition", y = "Count") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Create pie charts for key health conditions
+# High blood pressure
+bp_data <- meps_data %>% 
+  filter(HIBPDX %in% c(1, 2)) %>%
+  group_by(HIBPDX) %>%
+  summarise(count = n())
+
+ggplot(bp_data, aes(x = "", y = count, fill = factor(HIBPDX))) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  scale_fill_manual(values = c("1" = "firebrick", "2" = "steelblue"),
+                   labels = c("1" = "Yes", "2" = "No")) +
+  labs(title = "High Blood Pressure Diagnosis", fill = "Diagnosis") +
+  theme_void()
+
+# Diabetes
+diabetes_data <- meps_data %>% 
+  filter(DIABDX_M18 %in% c(1, 2)) %>%
+  group_by(DIABDX_M18) %>%
+  summarise(count = n())
+
+ggplot(diabetes_data, aes(x = "", y = count, fill = factor(DIABDX_M18))) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  scale_fill_manual(values = c("1" = "firebrick", "2" = "steelblue"),
+                   labels = c("1" = "Yes", "2" = "No")) +
+  labs(title = "Diabetes Diagnosis", fill = "Diagnosis") +
+  theme_void()
+```
+
+
+### 3. HEALTH BEHAVIOR ANALYSIS
+
+```{r}
+# Smoking frequency
+smoke_plot <- meps_data %>%
+  filter(OFTSMK53 >= 1 & OFTSMK53 <= 3) %>%
+  ggplot(aes(x = factor(OFTSMK53), fill = factor(OFTSMK53))) +
+  geom_bar() +
+  scale_fill_manual(values = c("1" = "firebrick", "2" = "darkorange", "3" = "forestgreen"),
+                   labels = c("1" = "Every Day", "2" = "Some Days", "3" = "Not At All")) +
+  labs(title = "Smoking Frequency", x = "Frequency", y = "Count", fill = "Frequency") +
+  scale_x_discrete(labels = c("1" = "Every Day", "2" = "Some Days", "3" = "Not At All")) +
+  theme_minimal()
+
+# Physical exercise
+exercise_plot <- meps_data %>%
+  filter(PHYEXE53 %in% c(1, 2)) %>%
+  ggplot(aes(x = factor(PHYEXE53), fill = factor(PHYEXE53))) +
+  geom_bar() +
+  scale_fill_manual(values = c("1" = "forestgreen", "2" = "firebrick"),
+                   labels = c("1" = "Yes", "2" = "No")) +
+  labs(title = "Regular Physical Exercise", x = "Exercise 5× Weekly", y = "Count", fill = "Response") +
+  scale_x_discrete(labels = c("1" = "Yes", "2" = "No")) +
+  theme_minimal()
+
+# Sleep issues
+sleep_plot <- meps_data %>%
+  filter(ADSLEEP42 >= 1 & ADSLEEP42 <= 6) %>%
+  ggplot(aes(x = factor(ADSLEEP42), fill = factor(ADSLEEP42))) +
+  geom_bar() +
+  scale_fill_brewer(palette = "YlOrRd",
+                   labels = c("1" = "Not at all", "2" = "Once a month", 
+                              "3" = "Several times a month", "4" = "Once a week", 
+                              "5" = "Several times a week", "6" = "Almost every day")) +
+  labs(title = "Frequency of Sleep Issues", x = "Frequency", y = "Count", fill = "Frequency") +
+  scale_x_discrete(labels = c("1" = "Not at all", "2" = "Once a month", 
+                              "3" = "Several times a month", "4" = "Once a week", 
+                              "5" = "Several times a week", "6" = "Almost every day")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Alcohol consumption
+alcohol_plot <- meps_data %>%
+  filter(ADKALC42 >= 1 & ADKALC42 <= 7) %>%
+  ggplot(aes(x = factor(ADKALC42), fill = factor(ADKALC42))) +
+  geom_bar() +
+  scale_fill_brewer(palette = "Blues",
+                   labels = c("1" = "Never", "2" = "Less than monthly", 
+                              "3" = "Monthly", "4" = "Weekly", 
+                              "5" = "2-3 times a week", "6" = "4-6 times a week", 
+                              "7" = "Daily")) +
+  labs(title = "Alcohol Consumption Frequency", x = "Frequency", y = "Count", fill = "Frequency") +
+  scale_x_discrete(labels = c("1" = "Never", "2" = "Less than monthly", 
+                              "3" = "Monthly", "4" = "Weekly", 
+                              "5" = "2-3 times a week", "6" = "4-6 times a week", 
+                              "7" = "Daily")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Mental health K6SUM42 (distress index)
+mental_health_plot <- meps_data %>%
+  filter(K6SUM42 >= 0 & K6SUM42 <= 24) %>%
+  ggplot(aes(x = K6SUM42)) +
+  geom_histogram(bins = 24, fill = "purple", color = "white", alpha = 0.7) +
+  labs(title = "Mental Health Distress Score Distribution", 
+       x = "K6 Score (Higher = More Distress)", 
+       y = "Count") +
+  theme_minimal()
+
+# Display health behavior plots
+grid.arrange(smoke_plot, exercise_plot, ncol = 2)
+grid.arrange(sleep_plot, alcohol_plot, ncol = 2)
+mental_health_plot
+```
+
+
+### 4. FINANCIAL AND INSURANCE ANALYSIS
+
+```{r}
+# Family income distribution
+income_plot <- ggplot(meps_data, aes(x = FAMINC20)) +
+  geom_histogram(bins = 30, fill = "darkgreen", color = "white", alpha = 0.7) +
+  labs(title = "Family Income Distribution", x = "Family Income", y = "Count") +
+  theme_minimal()
+
+# Poverty level distribution
+poverty_plot <- ggplot(meps_data, aes(x = POVLEV20)) +
+  geom_histogram(bins = 30, fill = "darkred", color = "white", alpha = 0.7) +
+  labs(title = "Poverty Level Distribution", 
+       x = "Income as % of Poverty Line", 
+       y = "Count") +
+  theme_minimal()
+
+# Insurance coverage
+insurance_plot <- meps_data %>%
+  filter(INSCOV20 %in% c(1, 2, 3)) %>%
+  ggplot(aes(x = factor(INSCOV20), fill = factor(INSCOV20))) +
+  geom_bar() +
+  scale_fill_manual(values = c("1" = "steelblue", "2" = "darkgreen", "3" = "firebrick"),
+                   labels = c("1" = "Any Private", "2" = "Public Only", "3" = "Uninsured")) +
+  labs(title = "Health Insurance Coverage", x = "Coverage Type", y = "Count", fill = "Coverage Type") +
+  scale_x_discrete(labels = c("1" = "Any Private", "2" = "Public Only", "3" = "Uninsured")) +
+  theme_minimal()
+
+# Display financial and insurance plots
+grid.arrange(income_plot, poverty_plot, insurance_plot, ncol = 2)
+```
+
+
+### 5. HEALTHCARE EXPENDITURE ANALYSIS
+
+```{r}
+# Total healthcare expenditure
+exp_plot <- ggplot(meps_data, aes(x = TOTEXP20)) +
+  geom_histogram(bins = 30, fill = "navy", color = "white", alpha = 0.7) +
+  labs(title = "Total Healthcare Expenditure Distribution", 
+       x = "Total Expenditure", 
+       y = "Count") +
+  theme_minimal() +
+  scale_x_continuous(labels = scales::comma)
+
+# Log transformation for better visualization
+log_exp_plot <- ggplot(meps_data %>% filter(TOTEXP20 > 0), aes(x = log10(TOTEXP20))) +
+  geom_histogram(bins = 30, fill = "navy", color = "white", alpha = 0.7) +
+  labs(title = "Log10 of Total Healthcare Expenditure", 
+       x = "Log10(Total Expenditure)", 
+       y = "Count") +
+  theme_minimal()
+
+# Expenditure by type
+exp_types <- meps_data %>%
+  select(OBDEXP20, OPTEXP20, ERDEXP20, RXEXP20, IPDEXP20) %>%
+  gather(key = "exp_type", value = "amount") %>%
+  filter(!is.na(amount)) %>%
+  group_by(exp_type) %>%
+  summarise(total = sum(amount, na.rm = TRUE)) %>%
+  arrange(desc(total))
+
+exp_types_plot <- ggplot(exp_types, aes(x = reorder(exp_type, total), y = total, fill = exp_type)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Set1", 
+                    labels = c("ERDEXP20" = "Emergency Room", 
+                               "IPDEXP20" = "Hospital Stay",
+                               "OBDEXP20" = "Office-Based Doctor",
+                               "OPTEXP20" = "Outpatient Facility",
+                               "RXEXP20" = "Prescription")) +
+  labs(title = "Healthcare Expenditure by Type", 
+       x = "Expenditure Type", 
+       y = "Total Amount", 
+       fill = "Expenditure Type") +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip()
+
+# Display expenditure plots
+grid.arrange(exp_plot, log_exp_plot, ncol = 2)
+exp_types_plot
+```
+
+
+### 6. RELATIONSHIP BETWEEN VARIABLES
+
+```{r}
+# Age vs Total Expenditure
+age_exp_plot <- ggplot(meps_data, aes(x = AGE20X, y = TOTEXP20)) +
+  geom_point(alpha = 0.3, color = "darkblue") +
+  geom_smooth(method = "loess", color = "red") +
+  labs(title = "Age vs Healthcare Expenditure", 
+       x = "Age", 
+       y = "Total Expenditure") +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma)
+
+# Health conditions vs Expenditure
+# Create health condition count variable
+meps_data$health_condition_count <- rowSums(meps_data[, c("HIBPDX", "CHDDX", "MIDX", "STRKDX", 
+                                                      "CHBRON53", "CHOLDX", "CANCERDX", 
+                                                      "DIABDX_M18", "JTPAIN53_M18", "ARTHDX")] == 1, na.rm = TRUE)
+
+condition_exp_plot <- ggplot(meps_data, aes(x = factor(health_condition_count), y = TOTEXP20)) +
+  geom_boxplot(fill = "lightblue", outlier.alpha = 0.3) +
+  labs(title = "Number of Health Conditions vs Healthcare Expenditure", 
+       x = "Number of Health Conditions", 
+       y = "Total Expenditure") +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma)
+
+# Insurance type vs Expenditure
+insurance_exp_plot <- ggplot(meps_data %>% filter(INSCOV20 %in% c(1, 2, 3)), 
+                            aes(x = factor(INSCOV20), y = TOTEXP20, fill = factor(INSCOV20))) +
+  geom_boxplot(outlier.alpha = 0.3) +
+  scale_fill_manual(values = c("1" = "steelblue", "2" = "darkgreen", "3" = "firebrick"),
+                   labels = c("1" = "Any Private", "2" = "Public Only", "3" = "Uninsured")) +
+  labs(title = "Insurance Coverage vs Healthcare Expenditure", 
+       x = "Insurance Type", 
+       y = "Total Expenditure",
+       fill = "Insurance Type") +
+  scale_x_discrete(labels = c("1" = "Any Private", "2" = "Public Only", "3" = "Uninsured")) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma)
+
+# Display relationship plots
+grid.arrange(age_exp_plot, condition_exp_plot, insurance_exp_plot, ncol = 2)
+```
+
+
+### 7. CORRELATION ANALYSIS
+
+```{r}
+# Select numeric variables for correlation
+num_vars <- meps_data %>%
+  select(AGE20X, FAMINC20, POVLEV20, TOTEXP20, OBDEXP20, OPTEXP20, ERDEXP20, RXEXP20, IPDEXP20, 
+         health_condition_count, K6SUM42, ADNUMDRK42) %>%
+  select_if(is.numeric)
+
+# Calculate correlation matrix
+corr_matrix <- cor(num_vars, use = "pairwise.complete.obs")
+
+# Create correlation plot
+corrplot(corr_matrix, method = "circle", type = "upper", order = "hclust",
+         tl.col = "black", tl.srt = 45, addCoef.col = "black", 
+         col = colorRampPalette(c("#6D9EC1", "white", "#E46726"))(200))
+```
+
+
+### 8. CONCLUSION
+
+```{r}
+# Create a summary statistics table for key variables
+summary_stats <- data.frame(
+  Variable = c("Age", "Family Income", "Poverty Level", "Total Healthcare Expenditure",
+               "Office-Based Expenditure", "Outpatient Expenditure", "Emergency Room Expenditure",
+               "Prescription Expenditure", "Inpatient Expenditure", "Number of Health Conditions",
+               "Mental Health Score"),
+  Mean = sapply(meps_data[c("AGE20X", "FAMINC20", "POVLEV20", "TOTEXP20", "OBDEXP20", 
+                             "OPTEXP20", "ERDEXP20", "RXEXP20", "IPDEXP20", 
+                             "health_condition_count", "K6SUM42")], 
+                mean, na.rm = TRUE),
+  Median = sapply(meps_data[c("AGE20X", "FAMINC20", "POVLEV20", "TOTEXP20", "OBDEXP20", 
+                               "OPTEXP20", "ERDEXP20", "RXEXP20", "IPDEXP20", 
+                               "health_condition_count", "K6SUM42")], 
+                  median, na.rm = TRUE),
+  SD = sapply(meps_data[c("AGE20X", "FAMINC20", "POVLEV20", "TOTEXP20", "OBDEXP20", 
+                           "OPTEXP20", "ERDEXP20", "RXEXP20", "IPDEXP20", 
+                           "health_condition_count", "K6SUM42")], 
+              sd, na.rm = TRUE),
+  Min = sapply(meps_data[c("AGE20X", "FAMINC20", "POVLEV20", "TOTEXP20", "OBDEXP20", 
+                            "OPTEXP20", "ERDEXP20", "RXEXP20", "IPDEXP20", 
+                            "health_condition_count", "K6SUM42")], 
+               min, na.rm = TRUE),
+  Max = sapply(meps_data[c("AGE20X", "FAMINC20", "POVLEV20", "TOTEXP20", "OBDEXP20", 
+                            "OPTEXP20", "ERDEXP20", "RXEXP20", "IPDEXP20", 
+                            "health_condition_count", "K6SUM42")], 
+               max, na.rm = TRUE)
+)
+
+# Print summary statistics
+print(summary_stats)
+
+# Write summary statistics to CSV
+write.csv(summary_stats, "MEPS_Summary_Statistics.csv", row.names = FALSE)
+```
+
+
+
+
+----------------------------------------------------------------------------------------------------
+
+
+
+1. **Research Question 1:** Identifying which components of medical expenditure most significantly contribute to individuals’ total annual healthcare spending.
+
+### Exploratory Data Analysis for MEPS Expenditure Variables
+### Focus on: TOTEXP20, OBDEXP20, OPTEXP20, ERDEXP20, IPDEXP20, RXEXP20
+
+
+```{r}
+# Filter data where TOTEXP20 > 0
+meps_filtered <- meps_data %>% filter(TOTEXP20 > 0)
+
+# Print basic summary statistics
+cat("SUMMARY OF FILTERED DATASET (TOTEXP20 > 0)\n")
+cat("Number of observations:", nrow(meps_filtered), "\n")
+print(summary(meps_filtered[c("TOTEXP20", "OBDEXP20", "OPTEXP20", "ERDEXP20", "IPDEXP20", "RXEXP20")]))
+```
+
+```{r}
+# Create a function to get more detailed statistics
+get_stats <- function(data, var) {
+  stats <- data %>%
+    summarize(
+      Mean = mean({{var}}, na.rm = TRUE),
+      Median = median({{var}}, na.rm = TRUE),
+      Min = min({{var}}, na.rm = TRUE),
+      Max = max({{var}}, na.rm = TRUE),
+      Q1 = quantile({{var}}, 0.25, na.rm = TRUE),
+      Q3 = quantile({{var}}, 0.75, na.rm = TRUE),
+      SD = sd({{var}}, na.rm = TRUE),
+      Zeros = sum({{var}} == 0, na.rm = TRUE),
+      `Zero_Percent` = 100 * sum({{var}} == 0, na.rm = TRUE) / n()
+    )
+  return(stats)
+}
+
+# Get detailed statistics for each variable
+expenditure_vars <- c("TOTEXP20", "OBDEXP20", "OPTEXP20", "ERDEXP20", "IPDEXP20", "RXEXP20")
+stats_list <- list()
+
+for (var in expenditure_vars) {
+  stats_list[[var]] <- get_stats(meps_filtered, !!sym(var))
+}
+
+# Combine all statistics
+all_stats <- bind_rows(stats_list, .id = "Variable")
+print(all_stats)
+```
+
+
+```{r}
+# Calculate proportion of each expenditure type in total expenditure
+meps_filtered <- meps_filtered %>%
+  mutate(
+    OBD_prop = OBDEXP20 / TOTEXP20,
+    OPT_prop = OPTEXP20 / TOTEXP20,
+    ERD_prop = ERDEXP20 / TOTEXP20,
+    IPD_prop = IPDEXP20 / TOTEXP20,
+    RX_prop = RXEXP20 / TOTEXP20
+  )
+
+# Summary of proportions
+cat("\nPROPORTION OF EACH EXPENDITURE TYPE IN TOTAL EXPENDITURE\n")
+print(summary(meps_filtered[c("OBD_prop", "OPT_prop", "ERD_prop", "IPD_prop", "RX_prop")]))
+```
+
+### VISUALIZATIONS
+
+### 1. Histograms for original values (for non-zero values)
+
+```{r}
+# Create a function to generate histograms with better binning
+create_histogram <- function(data, var_name, title) {
+  data_non_zero <- data %>% filter(!!sym(var_name) > 0)
+  p <- ggplot(data_non_zero, aes(x = !!sym(var_name))) +
+    geom_histogram(bins = 30, fill = "steelblue", color = "black") +
+    scale_x_continuous(labels = scales::dollar_format()) +
+    theme_minimal() +
+    labs(
+      title = title,
+      subtitle = paste0(
+        "Non-zero values only (n=", nrow(data_non_zero), ")\n",
+        "Mean: $", format(round(mean(data_non_zero[[var_name]]), 2), big.mark = ","), 
+        ", Median: $", format(round(median(data_non_zero[[var_name]]), 2), big.mark = ",")
+      ),
+      x = "Amount ($)",
+      y = "Frequency"
+    )
+  return(p)
+}
+
+# Generate histograms for each variable
+histograms <- list()
+for (i in seq_along(expenditure_vars)) {
+  var <- expenditure_vars[i]
+  title <- case_when(
+    var == "TOTEXP20" ~ "Total Medical Expenditure",
+    var == "OBDEXP20" ~ "Office-Based Expenditure",
+    var == "OPTEXP20" ~ "Outpatient Expenditure",
+    var == "ERDEXP20" ~ "Emergency Room Expenditure",
+    var == "IPDEXP20" ~ "Inpatient Expenditure",
+    var == "RXEXP20" ~ "Prescription Medication Expenditure",
+    TRUE ~ var
+  )
+  histograms[[i]] <- create_histogram(meps_filtered, var, title)
+}
+
+# Arrange histograms in a grid (3x2)
+hist_grid <- grid.arrange(grobs = histograms, ncol = 2)
+```
+
+### 2. Log-transformed histograms (better for skewed data)
+
+```{r}
+# Create a function to generate log histograms
+create_log_histogram <- function(data, var_name, title) {
+  data_non_zero <- data %>% filter(!!sym(var_name) > 0)
+  log_var <- log(data_non_zero[[var_name]] + 1)
+  
+  p <- ggplot(data_non_zero, aes(x = log(!!sym(var_name) + 1))) +
+    geom_histogram(bins = 30, fill = "darkgreen", color = "black") +
+    theme_minimal() +
+    labs(
+      title = paste("Log-transformed", title),
+      subtitle = paste0(
+        "Non-zero values only (n=", nrow(data_non_zero), ")\n",
+        "Mean of log: ", round(mean(log_var), 2), 
+        ", Median of log: ", round(median(log_var), 2)
+      ),
+      x = "Log(Amount + 1)",
+      y = "Frequency"
+    )
+  return(p)
+}
+
+# Generate log histograms
+log_histograms <- list()
+for (i in seq_along(expenditure_vars)) {
+  var <- expenditure_vars[i]
+  title <- case_when(
+    var == "TOTEXP20" ~ "Total Medical Expenditure",
+    var == "OBDEXP20" ~ "Office-Based Expenditure",
+    var == "OPTEXP20" ~ "Outpatient Expenditure",
+    var == "ERDEXP20" ~ "Emergency Room Expenditure",
+    var == "IPDEXP20" ~ "Inpatient Expenditure",
+    var == "RXEXP20" ~ "Prescription Medication Expenditure",
+    TRUE ~ var
+  )
+  log_histograms[[i]] <- create_log_histogram(meps_filtered, var, title)
+}
+
+# Arrange log histograms in a grid
+log_hist_grid <- grid.arrange(grobs = log_histograms, ncol = 2)
+```
+
+### 3. Boxplots (for non-zero values)
+
+```{r}
+# Create a function to generate boxplot
+create_boxplot <- function(data, var_name, title) {
+  data_non_zero <- data %>% filter(!!sym(var_name) > 0)
+  
+  p <- ggplot(data_non_zero, aes(y = !!sym(var_name))) +
+    geom_boxplot(fill = "lightblue") +
+    coord_flip() +
+    scale_y_continuous(labels = scales::dollar_format()) +
+    theme_minimal() +
+    labs(
+      title = title,
+      subtitle = paste0("Non-zero values only (n=", nrow(data_non_zero), ")"),
+      y = "Amount ($)",
+      x = ""
+    )
+  return(p)
+}
+
+# Generate boxplots
+boxplots <- list()
+for (i in seq_along(expenditure_vars)) {
+  var <- expenditure_vars[i]
+  title <- case_when(
+    var == "TOTEXP20" ~ "Total Medical Expenditure",
+    var == "OBDEXP20" ~ "Office-Based Expenditure",
+    var == "OPTEXP20" ~ "Outpatient Expenditure",
+    var == "ERDEXP20" ~ "Emergency Room Expenditure",
+    var == "IPDEXP20" ~ "Inpatient Expenditure",
+    var == "RXEXP20" ~ "Prescription Medication Expenditure",
+    TRUE ~ var
+  )
+  boxplots[[i]] <- create_boxplot(meps_filtered, var, title)
+}
+
+# Arrange boxplots in a grid
+box_grid <- grid.arrange(grobs = boxplots, ncol = 2)
+```
+
+### 4. Log-transformed boxplots
+
+```{r}
+# Create a function to generate log-transformed boxplot
+create_log_boxplot <- function(data, var_name, title) {
+  data_non_zero <- data %>% filter(!!sym(var_name) > 0)
+  
+  p <- ggplot(data_non_zero, aes(y = log(!!sym(var_name) + 1))) +
+    geom_boxplot(fill = "lightgreen") +
+    coord_flip() +
+    theme_minimal() +
+    labs(
+      title = paste("Log-transformed", title),
+      subtitle = paste0("Non-zero values only (n=", nrow(data_non_zero), ")"),
+      y = "Log(Amount + 1)",
+      x = ""
+    )
+  return(p)
+}
+
+# Generate log boxplots
+log_boxplots <- list()
+for (i in seq_along(expenditure_vars)) {
+  var <- expenditure_vars[i]
+  title <- case_when(
+    var == "TOTEXP20" ~ "Total Medical Expenditure",
+    var == "OBDEXP20" ~ "Office-Based Expenditure",
+    var == "OPTEXP20" ~ "Outpatient Expenditure",
+    var == "ERDEXP20" ~ "Emergency Room Expenditure",
+    var == "IPDEXP20" ~ "Inpatient Expenditure",
+    var == "RXEXP20" ~ "Prescription Medication Expenditure",
+    TRUE ~ var
+  )
+  log_boxplots[[i]] <- create_log_boxplot(meps_filtered, var, title)
+}
+
+# Arrange log boxplots in a grid
+log_box_grid <- grid.arrange(grobs = log_boxplots, ncol = 2)
+```
+
+### 5. Scatterplot matrix for expenditures
+
+```{r}
+# Scatterplot matrix for expenditures
+pairs(~ TOTEXP20 + OBDEXP20 + OPTEXP20 + ERDEXP20 + IPDEXP20 + RXEXP20, 
+      data = meps_filtered,
+      main = "Scatterplot Matrix of Expenditure Variables",
+      pch = 19,
+      cex = 0.5,
+      col = "darkblue")
+```
+
+### 6. Correlation matrix
+
+```{r}
+# Correlation matrix
+correlation_matrix <- cor(meps_filtered[, expenditure_vars], use = "pairwise.complete.obs")
+print("Correlation Matrix of Expenditure Variables:")
+print(correlation_matrix)
+```
+
+```{r}
+# Visualize correlation matrix
+corrplot(correlation_matrix, 
+         method = "color", 
+         type = "upper", 
+         addCoef.col = "black",
+         tl.col = "black",
+         tl.srt = 45,
+         diag = FALSE,
+         title = "Correlation Matrix of Expenditure Variables",
+         mar = c(0,0,2,0))
+```
+
+### 7. Pie chart of average proportion/absolute sum of each type of expenditure
+
+```{r}
+# Calculate average proportion of each type of expenditure
+avg_proportions <- meps_filtered %>%
+  summarize(
+    OBD_prop = mean(OBD_prop, na.rm = TRUE),
+    OPT_prop = mean(OPT_prop, na.rm = TRUE),
+    ERD_prop = mean(ERD_prop, na.rm = TRUE),
+    IPD_prop = mean(IPD_prop, na.rm = TRUE),
+    RX_prop = mean(RX_prop, na.rm = TRUE)
+  ) %>%
+  pivot_longer(cols = everything(), names_to = "Expenditure_Type", values_to = "Proportion")
+
+avg_proportions$Expenditure_Type <- gsub("_prop", "", avg_proportions$Expenditure_Type)
+avg_proportions$Expenditure_Type <- factor(avg_proportions$Expenditure_Type, 
+                                          levels = c("OBD", "OPT", "ERD", "IPD", "RX"),
+                                          labels = c("Office-Based", "Outpatient", "Emergency Room", 
+                                                    "Inpatient", "Prescription"))
+
+# Calculate absolute sum of each type of expenditure
+total_sum <- meps_filtered %>%
+  summarize(
+    OfficeBased = sum(OBDEXP20, na.rm = TRUE),
+    Outpatient  = sum(OPTEXP20, na.rm = TRUE),
+    Emergency   = sum(ERDEXP20, na.rm = TRUE),
+    Inpatient   = sum(IPDEXP20, na.rm = TRUE),
+    Prescription= sum(RXEXP20,  na.rm = TRUE)
+  ) %>%
+  pivot_longer(cols = everything(), names_to = "Expenditure_Type", values_to = "Total_Amount")
+
+total_sum <- total_sum %>%
+  mutate(Proportion = Total_Amount / sum(Total_Amount),
+         Expenditure_Type = factor(Expenditure_Type,
+                                    levels = c("OfficeBased", "Outpatient", "Emergency", "Inpatient", "Prescription"),
+                                    labels = c("Office-Based", "Outpatient", "Emergency Room", "Inpatient", "Prescription")))
+
+
+
+# Pie chart creation
+create_pie_chart <- function(data, title_col, subtitle_text) {
+  ggplot(data, aes(x = "", y = Proportion, fill = Expenditure_Type)) +
+    geom_bar(stat = "identity", width = 1) +
+    coord_polar("y", start = 0) +
+    scale_fill_brewer(palette = "Set2") +
+    theme_minimal() +
+    theme(
+      axis.text = element_blank(),
+      axis.title = element_blank(),
+      panel.grid = element_blank()
+    ) +
+    labs(
+      title = title_col,
+      subtitle = subtitle_text,
+      fill = "Expenditure Type"
+    ) +
+    geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")),
+              position = position_stack(vjust = 0.5))
+}
+
+# Generate pie charts
+p2 <- create_pie_chart(total_sum,
+                       "Total Spending Share of Each Expenditure Type",
+                       "For individuals with TOTEXP20 > 0 (based on total summed amount)")
+p2
+```
+
+### 8. Distribution of expenditure components by violin plot
+
+```{r}
+# Prepare data for plotting
+long_data <- meps_filtered %>%
+  dplyr::select(all_of(expenditure_vars[-1])) %>%  # Exclude TOTEXP20
+  pivot_longer(cols = everything(), 
+               names_to = "Expenditure_Type", 
+               values_to = "Amount") %>%
+  filter(Amount > 0)  # Only include non-zero amounts
+
+# Rename expenditure types for better readability
+long_data$Expenditure_Type <- factor(long_data$Expenditure_Type,
+                                    levels = c("OBDEXP20", "OPTEXP20", "ERDEXP20", "IPDEXP20", "RXEXP20"),
+                                    labels = c("Office-Based", "Outpatient", "Emergency Room", 
+                                              "Inpatient", "Prescription"))
+
+# Violin plot of distributions
+violin_plot <- ggplot(long_data, aes(x = Expenditure_Type, y = Amount, fill = Expenditure_Type)) +
+  geom_violin(trim = FALSE, alpha = 0.7) +
+  geom_boxplot(width = 0.1, outlier.shape = NA) +
+  scale_y_continuous(labels = scales::dollar_format(), trans = "log10") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  labs(
+    title = "Distribution of Expenditure Components",
+    subtitle = "Log scale, non-zero values only",
+    x = "Expenditure Type",
+    y = "Amount (log scale, $)"
+  )
+
+print(violin_plot)
+```
+
+### Showing some important statistics
+
+```{r}
+# Create a function to determine the top expenditure component for each individual
+meps_filtered <- meps_filtered %>%
+  mutate(
+    top_component = case_when(
+      pmax(OBDEXP20, OPTEXP20, ERDEXP20, IPDEXP20, RXEXP20) == OBDEXP20 ~ "Office-Based",
+      pmax(OBDEXP20, OPTEXP20, ERDEXP20, IPDEXP20, RXEXP20) == OPTEXP20 ~ "Outpatient",
+      pmax(OBDEXP20, OPTEXP20, ERDEXP20, IPDEXP20, RXEXP20) == ERDEXP20 ~ "Emergency Room",
+      pmax(OBDEXP20, OPTEXP20, ERDEXP20, IPDEXP20, RXEXP20) == IPDEXP20 ~ "Inpatient",
+      pmax(OBDEXP20, OPTEXP20, ERDEXP20, IPDEXP20, RXEXP20) == RXEXP20 ~ "Prescription",
+      TRUE ~ "Equal/Unknown"
+    )
+  )
+
+# Count frequency of top components
+top_component_counts <- meps_filtered %>%
+  count(top_component) %>%
+  mutate(percentage = n / sum(n) * 100)
+
+# Create expenditure ranges for analysis
+meps_filtered <- meps_filtered %>%
+  mutate(
+    total_exp_category = cut(
+      TOTEXP20,
+      breaks = c(0, 1000, 5000, 10000, 25000, 50000, Inf),
+      labels = c("$1-$1K", "$1K-$5K", "$5K-$10K", "$10K-$25K", "$25K-$50K", "$50K+"),
+      include.lowest = TRUE
+    )
+  )
+
+# Calculate average proportions by expenditure category
+proportions_by_category <- meps_filtered %>%
+  group_by(total_exp_category) %>%
+  summarize(
+    count = n(),
+    avg_OBD_prop = mean(OBD_prop, na.rm = TRUE),
+    avg_OPT_prop = mean(OPT_prop, na.rm = TRUE),
+    avg_ERD_prop = mean(ERD_prop, na.rm = TRUE),
+    avg_IPD_prop = mean(IPD_prop, na.rm = TRUE),
+    avg_RX_prop = mean(RX_prop, na.rm = TRUE)
+  )
+
+# Convert to long format for plotting
+prop_long <- proportions_by_category %>%
+  pivot_longer(
+    cols = starts_with("avg_"),
+    names_to = "expenditure_type",
+    values_to = "proportion"
+  ) %>%
+  mutate(
+    expenditure_type = gsub("avg_", "", expenditure_type),
+    expenditure_type = gsub("_prop", "", expenditure_type),
+    expenditure_type = factor(
+      expenditure_type,
+      levels = c("OBD", "OPT", "ERD", "IPD", "RX"),
+      labels = c("Office-Based", "Outpatient", "Emergency Room", "Inpatient", "Prescription")
+    )
+  )
+
+# Print some final statistics
+cat("\nSUMMARY OF KEY FINDINGS:\n")
+cat("1. Most common top expenditure component:", 
+    top_component_counts$top_component[which.max(top_component_counts$n)], 
+    "for", round(max(top_component_counts$percentage), 1), "% of individuals\n")
+
+cat("2. Average proportions of total expenditure:\n")
+for (i in 1:nrow(avg_proportions)) {
+  cat("   -", avg_proportions$Expenditure_Type[i], ": ", 
+      round(avg_proportions$Proportion[i] * 100, 1), "%\n", sep = "")
+}
+
+cat("3. For high spenders ($50K+), most significant component is:", 
+    prop_long %>% 
+      filter(total_exp_category == "$50K+") %>% 
+      arrange(desc(proportion)) %>% 
+      dplyr::slice(1) %>% 
+      pull(expenditure_type), "\n")
+
+cat("4. For low spenders ($1-$1K), most significant component is:",
+    prop_long %>% 
+      filter(total_exp_category == "$1-$1K") %>% 
+      arrange(desc(proportion)) %>% 
+      dplyr::slice(1) %>% 
+      pull(expenditure_type), "\n")
+```
+
+### Creating model_data, where all healthcare expenditure variables are > 0 and log-transformed
+
+```{r}
+# Data preprocessing: Keep only rows where all expenditure variables are > 0
+model_data <- meps_filtered %>%
+  mutate(
+    log_total = log(TOTEXP20 + 1),
+    log_obd   = log(OBDEXP20 + 1),
+    log_opt   = log(OPTEXP20 + 1),
+    log_er    = log(ERDEXP20 + 1),
+    log_ip    = log(IPDEXP20 + 1),
+    log_rx    = log(RXEXP20 + 1)
+  ) %>%
+  dplyr::select(log_total, log_obd, log_opt, log_er, log_ip, log_rx)
+```
+
+
+### Runs an Analysis of Variance (ANOVA) on the regression model
+
+```{r}
+# Fit a linear regression model to predict log-transformed total expenditure
+lm_full <- lm(log_total ~ ., data = model_data)
+
+# Print summary statistics of the regression model
+summary(lm_full)
+
+# Run an Analysis of Variance (ANOVA) to evaluate variable significance
+cat("🔍 ANOVA:\n")
+aov(lm_full)
+
+# Check multicollinearity using Variance Inflation Factor (VIF)
+cat("\n📏 VIF (Variance Inflation Factor):\n")
+print(vif(lm_full))
+```
+
+Model Fit
+1. The model explains 59.6% of the variance in total spending (in log scale), which is solid for healthcare cost data.
+
+ANOVA
+1. This shows how much each variable contributes to explaining total variance.
+2. Office-based care (log_obd) explains the most variance, followed by prescription (log_rx) and outpatient (log_opt).
+3. Inpatient (log_ip) has high individual predictive power but contributes slightly less overall variance than log_rx due to fewer occurrences (likely due to 0s in raw data).
+
+Variance Inflation Factor (VIF)
+1. All VIF values are well below 5, indicating no multicollinearity issue.
+
+### Splitting the model_data in training and testing dataset
+
+```{r}
+# Set a seed for reproducibility
+set.seed(123)
+
+# Split the data: 75% for training and 25% for testing
+train_index <- createDataPartition(model_data$log_total, p = 0.75, list = FALSE)
+
+# Create training and test datasets
+train_data <- model_data[train_index, ]
+test_data  <- model_data[-train_index, ]
+```
+
+
+### Linear Regression on Train Set
+
+```{r}
+# Applying linear regression model
+lm_model <- lm(log_total ~ ., data = train_data)
+summary(lm_model)
+
+# Predictions and performance
+lm_preds <- predict(lm_model, newdata = test_data)
+lm_rmse  <- RMSE(lm_preds, test_data$log_total)
+lm_r2    <- R2(lm_preds, test_data$log_total)
+
+cat("🔹Linear Regression RMSE:", round(lm_rmse, 3), "\n")
+cat("🔹Linear Regression R²:", round(lm_r2, 3), "\n")
+```
+
+1. All predictor variables are statistically significant (p-values < 0.001), indicating that each expenditure type contributes meaningfully to predicting the total medical cost (log-transformed).
+2. About 59.1% of the variance in log_total is explained by the model on the test set, which suggests a moderately strong fit.
+3. RMSE = 1.136: On average, the model’s predictions are off by about 1.136 units on the log-transformed scale of total medical expenditure.
+4. All coefficients are positive, meaning higher spending in any category (e.g., office-based care, prescriptions) is associated with a higher total expenditure.
+ 1) log_rx (Prescriptions) and log_ip (Inpatient) are the strongest predictors (coefficients ≈ 0.22–0.23).
+ 2) log_er (Emergency Room) has the smallest coefficient (~0.13), but is still statistically significant.
+
+### XGBoost Model
+
+```{r}
+set.seed(123)
+
+# Train an XGBoost model using 5-fold cross-validation
+xgb_model <- train(
+  log_total ~ .,       # Formula: predict 'log_total' using all other variables
+  data = train_data,   # Training dataset
+  method = "xgbTree",  # Use XGBoost with tree-based model
+  trControl = trainControl("cv", number = 5), # Set up cross-validation control / Use cross-validation, # of folds = 5
+  verbose = FALSE      # Suppress verbose output during training
+)
+
+# Warning: 'ntree_limit' is deprecated in the latest XGBoost version.
+# It is recommended to use 'iteration_range' instead for specifying the number of boosting rounds.
+```
+
+
+### # Predictions and performance of XGBoost Model on test data
+
+```{r}
+# Predictions and performance
+
+# Generate predictions on the test set using the trained XGBoost model
+xgb_preds <- predict(xgb_model, newdata = test_data)
+
+# Calculate Root Mean Squared Error (RMSE) between predicted and actual values
+xgb_rmse  <- RMSE(xgb_preds, test_data$log_total)
+
+# Calculate R-squared (R²) to assess model explanatory power
+xgb_r2    <- R2(xgb_preds, test_data$log_total)
+
+cat("🔹XGBoost RMSE:", round(xgb_rmse, 3), "\n")
+cat("🔹XGBoost R²:", round(xgb_r2, 3), "\n")
+```
+
+1. XGBoost RMSE: 0.949 - On average, the prediction error is about 0.949 in log-transformed total medical expenditure. This suggests the model is fairly accurate.
+2. XGBoost R²: 0.715 - The model explains 71.5% of the variance in total medical spending. This indicates strong predictive performance and good fit to the data.
+
+### Extract feature importance from XGBoost Model
+
+```{r}
+# Extract feature importance from XGBoost model
+importance_matrix <- xgb.importance(model = xgb_model$finalModel)  # Use .finalModel from caret::train
+print(importance_matrix)
+
+# Plot the importance as a bar chart
+xgb.plot.importance(
+  importance_matrix,
+  main = "📊 XGBoost Feature Importance",
+  rel_to_first = TRUE,
+  xlab = "Relative Importance"
+)
+```
+
+
+```{r}
+# Create a summary table of model performance
+model_perf <- tibble(
+  Model = c("Linear Regression", "XGBoost"),
+  RMSE = c(round(lm_rmse, 3), round(xgb_rmse, 3)),
+  R_squared = c(round(lm_r2, 3), round(xgb_r2, 3))
+)
+
+print(model_perf)
+```
+
+
+### Comprehensive Interpretation and Discussion
+
+The goal of this study was to identify which types of healthcare expenditures most significantly influence total medical spending in the U.S. system. In a highly fragmented and cost-intensive healthcare landscape, understanding where the largest costs accumulate is crucial for designing cost containment policies, improving patient welfare, and expanding insurance coverage.
+
+
+### 1. Methodological Approach
+
+We used a combination of:
+- *Exploratory Data Analysis (EDA)* to understand distribution and composition patterns.
+- *Linear Regression* to quantify the contribution of each cost type.
+- *ANOVA* to evaluate variance attribution.
+- *XGBoost modeling* to capture nonlinear interactions and rank feature importance.
+
+
+### 2. Key Findings
+### 2-1. Expenditure Distribution Patterns
+
+- All six categories—office-based, outpatient, ER, inpatient, and prescription—are highly right-skewed.
+- Many individuals have zero expenditure in ER or inpatient services, but when incurred, those are very costly.
+- Log transformation successfully normalized the data and allowed robust modeling.
+
+These findings suggest that medical expenditure patterns vary substantially across the population, creating distinct profiles of healthcare service utilization.
+
+
+### 2-2. Expenditure Composition Insights
+
+- On average, office-based care accounts for the largest share (24.3%), followed by prescriptions (18.7%).
+- However, when aggregating total dollars across individuals, prescription drugs dominate at 46.1%, especially among high spenders.
+- Inpatient services, while used less frequently, account for a large chunk of spending per episode.
+
+
+### 2-3. ANOVA Results
+
+- ANOVA results indicated that office-based care (log_obd) explained the largest share of variance in total healthcare spending, followed by prescription drugs (log_rx). All five predictors were statistically significant (p < 0.001), and multicollinearity was minimal (VIF < 1.3).
+
+
+### 2-4. Regression Results
+
+- The multiple linear regression model explained 59.1% of the variance in total healthcare expenditure on the test set (R² = 0.591), with a root mean squared error (RMSE) of 1.136.
+- Regression coefficients revealed that inpatient care (0.229) and prescription drug costs (0.219) had the strongest marginal effects on total expenditure. Office-based care (0.155) also showed meaningful influence, reflecting high frequency of use despite lower per-unit cost.
+- All five predictors were statistically significant (p < 0.001), supporting their individual contributions to overall spending patterns.
+
+
+### 2-5. XGBoost Performance
+
+- XGBoost significantly improved performance: R² = 0.715, RMSE = 0.949.
+- Feature importance rankings placed prescription costs (log_rx) as the most influential predictor, followed by office-based care (log_obd). In contrast, inpatient costs (log_ip), despite high marginal impact in regression, showed lower importance in XGBoost, reflecting their high cost but infrequent occurrence.
+
+
+### 3. Integrated Perspective
+
+The combination of regression modeling, ANOVA, and XGBoost demonstrates that prescription drug use, inpatient care, and office-based visits are the most influential drivers of total medical expenditures, each contributing through distinct mechanisms. Prescription drugs exert a strong impact due to their high frequency and cost, while inpatient care, though less frequent, incurs substantial costs per episode. Office-based care contributes significantly through high utilization, despite lower unit costs. In contrast, emergency and outpatient services, while important for access and continuity of care, showed comparatively lower influence across models.
+
+
+### 4. Policy Implications
+
+- *Expenditure Concentration: A Small Subset Drives the Majority of Costs*: Medical expenditures are highly concentrated, with a small proportion of individuals accounting for a disproportionate share of total spending. This is clearly visible in the right-skewed distribution of expenditures and is especially apparent in inpatient and prescription drug costs, which show extreme variability. These concentrated patterns suggest that healthcare interventions should prioritize high-cost individuals, particularly those with recurring or intensive care needs.
+- *Office-Based Care as a Central Pillar*: Across the board, office-based care emerges as the most frequent top expenditure category among individuals (55.1% of cases). Even when not the largest contributor in absolute dollars, it represents a consistent point of care access. This indicates its pivotal role in preventive care, chronic disease management, and care continuity. Ensuring accessibility, affordability, and effectiveness in office-based services may help prevent escalation to more expensive services like emergency room or inpatient care.
+- *Expenditure Transitions Across Spending Tiers*: As total medical expenditure increases, the composition of costs shifts noticeably. For lower spenders ($1–$1K), prescription drugs dominate, reflecting maintenance of chronic conditions or access to low-cost preventive therapies. However, in higher spending brackets ($50K+), inpatient care surges in share, indicating that acute, often catastrophic medical events such as surgeries or hospitalizations are major cost drivers. This transition implies that risk stratification in insurance and early interventions are key to mitigating high-cost episodes.
+- *Prescription Costs and the Hidden Burden on Lower-Spending Populations*: While inpatient care dominates among high spenders, prescription medications carry the highest overall share of total spending (46.1%) and remain the most important predictor in the XGBoost model. This is especially important for low-to-moderate income groups, for whom medication adherence may directly affect outcomes. It underscores the importance of subsidizing essential medicines, especially for chronic diseases, and ensuring coverage parity in insurance schemes.
+- *The Need for Targeted Policy Approaches*: These distinct expenditure patterns call for segmented policy interventions. For example: 1) Cost-control efforts in inpatient and prescription services for high-cost patients. 2) Preventive care investments and enhanced access to office-based care for broader populations. 3) Tiered insurance designs that reflect realistic service utilization profiles for different subpopulations.
+
+This analysis highlights that a one-size-fits-all policy is unlikely to succeed. Instead, health systems and insurers must tailor strategies to account for differentiated patterns of healthcare utilization and financial burden.
+
+
+### 5. Limitations and Future Directions
+
+- *Cross-sectional design*: The dataset captures a snapshot in time and does not allow for analysis of how expenditure patterns evolve. Thus, it limits inference on causal relationships or temporal changes in healthcare utilization.
+- *Zero-inflated expenditure data*: Many individuals reported zero spending in specific categories, particularly inpatient and emergency services. While log transformation helped mitigate this skewness, some degree of information loss or distortion may remain due to zero-inflation.
+- *Lack of demographic and health status controls*: This analysis focused purely on expenditure components without accounting for confounding factors such as age, comorbidities, income, insurance type, or social determinants of health — all of which influence spending patterns.
+- *Category aggregation*: The five expenditure categories used in this analysis (office-based, outpatient, emergency, inpatient, prescription) may obscure finer-grained spending drivers such as specialist services or branded drug categories.
+
+
+### 6. Future research should:
+
+- *Longitudinal analysis*: Follow individuals over multiple years to understand how spending evolves, particularly in response to chronic disease progression, insurance changes, or policy interventions.
+- *Demographic segmentation*: Investigate how expenditure patterns differ across race, ethnicity, income, age, gender, and geographic location.
+- *Incorporation of clinical outcomes*: Link expenditure data with health outcomes (e.g., hospitalization rates, disease control, quality of life) to assess cost-effectiveness and value of care.
+- *Deeper category decomposition*: Break down each major expenditure type into subcategories — for example, separating primary care from specialist visits, or generic vs. branded medications.
+- *Insurance design simulations*: Simulate how alternative cost-sharing or benefit design models could affect both total expenditure and access to care, particularly among vulnerable or high-cost populations.
+
+
+### 7. Conclusion
+
+This study presents a comprehensive analysis of medical expenditure patterns and their primary cost drivers using national survey data. Our findings highlight prescription drugs, inpatient services, and office-based care as the most influential components of total healthcare spending, each contributing through distinct mechanisms: frequent use (office-based care), high per-episode cost (inpatient), and combined frequency and cost (prescription).
+
+Through the integration of linear regression, ANOVA, and XGBoost modeling, we demonstrate that these components not only correlate strongly with total expenditure but also enable accurate prediction — with XGBoost achieving an R² of 0.715 and an RMSE of 0.949.
+
+From a policy standpoint, these insights underscore the need for:
+- Expanded and equitable prescription drug coverage,
+- Risk-adjusted financial protections for hospitalization, and
+- Greater investment in early interventions and chronic disease management through office-based services.
+
+By pinpointing where medical spending is most concentrated and impactful, this analysis supports the design of more targeted, equitable, and cost-effective healthcare delivery and insurance systems in the U.S.
+
+
+
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------------
+
+
+# Research Question 2: Examining the association between demographic factors and chronic disease prevalence.
+
+### Preparing Data
+
+```{r load_data_q2}
+# Create a copy for chronic disease analysis
+df_chro <- meps_data
+
+# Check and count variable values on each dependent variable
+# These variables represent different chronic conditions
+var1 <- c('HIBPDX', 'CHDDX', 'ARTHDX', 'DIABDX_M18')
+
+for (v in var1){
+  cat('Variable:', v, '\n')
+  print(table(df_chro[[v]]))
+  cat('\n')
+}
+```
+
+### Transforming negative values
+
+```{r transform_negative_values_q2}
+# Transform negative values into 2 (meaning "No")
+# Reasoning: -1 is not applicable, which suggests low possibility for the disease
+for (v in var1) {
+  df_chro[[v]][df_chro[[v]] < 0] <- 2
+}
+```
+
+
+### Crating a new column to indicate if respondents have at least one chronic disease
+
+```{r create_chronic_variable_q2}
+# Create a new column 'CHRONIC' to indicate if respondents have at least one chronic disease
+# 1 = Yes (has at least one chronic condition), 2 = No (has no chronic conditions)
+df_chro$CHRONIC <- ifelse(apply(df_chro[, var1], 1, function(x) any(x == 1)), 1, 2)
+```
+
+
+### Visualizing chronic variables 
+
+```{r visualize_chronic_vars_q2}
+# Visualize each columns into graph
+var2 <- c('HIBPDX', 'CHDDX', 'ARTHDX', 'DIABDX_M18', 'CHRONIC')
+
+# Transform long format
+df_long <- df_chro %>%
+  dplyr::select(all_of(var2)) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value")
+
+# Count each values
+df_counts <- df_long %>%
+  group_by(Variable, Value) %>%
+  summarize(n = n(), .groups = "drop")
+
+ggplot(df_counts, aes(x = factor(Value), y = n, fill = Variable)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ Variable, scales = "free_y") +
+  labs(title = "Chronic Disease Variable Distributions",
+       x = "Response Value (1 = Yes, 2 = No)",
+       y = "Count") +
+  theme_minimal()
+```
+
+### Checking values of each independent variables
+
+```{r independent_vars_check_q2}
+# Check and count values for each independent variable
+var_indep1 <- c('FCSZ1231', 'REGION20', 'AGE20X', 'SEX', 'RACEV2X')
+
+for (v in var_indep1){
+  cat('Variable:', v, '\n')
+  print(table(df_chro[[v]]))
+  cat('\n')
+}
+```
+
+### Transforming -1(negative) into appropriate values
+
+```{r transform_independent_vars_q2}
+# Transforming -1 not applicable values into appropriate values
+df_chro$FCSZ1231[df_chro$FCSZ1231 == -1] <- 1 # Assume NA family size as a single family
+df_chro$REGION20[df_chro$REGION20 == -1] <- 3 # NA are few, include to mode value 3
+df_chro$AGE20X[df_chro$AGE20X == -1] <- round(mean(df_chro$AGE20X[df_chro$AGE20X > 0], na.rm = TRUE)) # Use mean value for NA
+```
+
+
+### FInal Dataset for Analysis
+
+```{r create_final_dataset_q2}
+# Create final dataset for analysis
+var_all <- c("CHRONIC", var_indep1)
+df_chro_f <- df_chro[, var_all]
+
+# Convert categorical variables to factors
+df_chro_f$CHRONIC <- factor(df_chro_f$CHRONIC, levels = c(2, 1))
+df_chro_f$REGION20 <- factor(df_chro_f$REGION20)
+df_chro_f$SEX <- factor(df_chro_f$SEX)
+df_chro_f$RACEV2X <- factor(df_chro_f$RACEV2X)
+
+# Check structure of final dataset
+str(df_chro_f)
+```
+
+### Logistic Regression Analysis
+
+```{r logistic_regression_full_q2}
+# Implement logistic regression with all variables
+set.seed(123)
+logit_chro_all <- glm(CHRONIC ~ FCSZ1231 + REGION20 + AGE20X + SEX + RACEV2X,
+                   data = df_chro_f, 
+                   family = "binomial")
+
+# View regression results
+summary(logit_chro_all)
+```
+
+### Interpretation
+
+The logistic regression analysis identified several demographic variables as significant predictors of chronic disease presence. 
+
+**Age** was the strongest and most consistent factor—individuals of higher age were significantly more likely to report having a chronic condition.
+
+**Family size** showed a negative association with chronic disease. Respondents from larger households were less likely to have chronic conditions. However, this finding should be interpreted with caution, as larger households may also include younger members, whose lower age is associated with a reduced risk of chronic illness.
+
+**Geographic region** had a meaningful impact. Compared to Region 1, individuals in Region 2 and Region 3 had significantly higher odds of having a chronic disease, while Region 4 showed no significant difference.
+
+Regarding **race**, several categories were associated with elevated or reduced risk. Participants in race categories 2, 3, and 12 were significantly more likely to have chronic conditions compared to the reference group. In contrast, respondents in categories 4, 5, and 10 showed significantly lower odds of chronic disease.
+
+**Sex** was not a statistically significant predictor in this model, indicating no meaningful difference in chronic disease risk between males and females in the sampled population.
+
+Overall, age, family size, geographic region, and race were significant demographic predictors of chronic disease presence, while sex was not found to be a significant factor.
+
+
+## Predictive Modeling
+
+### Splitting data in training and testing dataset
+
+```{r split_data_q2}
+# Split data into training and testing sets
+set.seed(123)
+train.chro_idx <- createDataPartition(df_chro_f$CHRONIC, p = 0.7, list = FALSE)
+
+train_chro <- df_chro_f[train.chro_idx, ]
+test_chro <- df_chro_f[-train.chro_idx, ]
+
+cat("There are", nrow(train_chro), 'train data', '\n')
+cat("There are", nrow(test_chro), 'test data', '\n')
+```
+
+### Logistic Regression Model
+
+```{r fit_logistic_model_q2}
+# Fit logistic regression model on training data
+logit_chro <- glm(CHRONIC ~ FCSZ1231 + REGION20 + AGE20X + SEX + RACEV2X,
+                   data = train_chro, 
+                   family = "binomial")
+
+# Generate predictions on test data
+logit_probs_chro <- predict(logit_chro, newdata = test_chro, type = "response")
+
+logit_pred_chro <- ifelse(logit_probs_chro > 0.5, "1", "2")
+logit_pred_chro <- factor(logit_pred_chro, levels = c("2", "1"))
+
+# Confusion Matrix
+logit_cm_chro <- confusionMatrix(logit_pred_chro, test_chro$CHRONIC)
+logit_cm_chro
+```
+
+Accuracy: 0.8179
+Sensitivity: 0.8607
+Specificity: 0.7515
+
+The logistic regression model demonstrated strong classification performance on the test dataset. The overall accuracy was 81.8%, meaning that 81.8% of all predictions matched the true chronic disease status.
+
+The model treated "2" (i.e., “no chronic disease”) as the positive class. Based on this:
+	•	Sensitivity was 86.1%, indicating that the model correctly identified 86.1% of the people without chronic disease.
+	•	Specificity was 75.2%, showing that the model correctly predicted 75.2% of those who actually had chronic disease.
+
+### Random Forest Model
+
+```{r fit_rf_model_q2}
+# Fit Random Forest model on training data
+set.seed(123)
+rf_chro <- randomForest(CHRONIC ~ FCSZ1231 + REGION20 + AGE20X + SEX + RACEV2X,
+                        data = train_chro,
+                        ntree = 500,
+                        importance = TRUE)
+
+# Generate predictions on test data
+rf_pred_chro <- predict(rf_chro, newdata = test_chro)
+
+# Create confusion matrix to evaluate model performance
+rf_cm_chro <- confusionMatrix(rf_pred_chro, test_chro$CHRONIC)
+rf_cm_chro
+```
+Accuracy: 0.8158
+Sensitivity: 0.8368
+Specificity: 0.7833
+
+The logistic regression model demonstrated strong classification performance on the test dataset. The overall accuracy was 81.6%, meaning that 81.6% of all predictions matched the true chronic disease status.
+
+The model treated "2" (i.e., “no chronic disease”) as the positive class. Based on this:
+	•	Sensitivity was 83.7%, indicating that the model correctly identified 83.7% of the people without chronic disease.
+	•	Specificity was 78.3%, showing that the model correctly predicted 78.3% of those who actually had chronic disease.
+
+
+
+### Visualizing the importance of variables in RF Model
+
+```{r variable_importance_q2}
+# Visualize the importance of variables in the Random Forest model
+varImpPlot(rf_chro)
+```
+
+### Model Comparison
+
+```{r compare_models_q2}
+# Function to extract core performance metrics from confusion matrices
+extract_core_metrics <- function(cm) {
+  metrics <- c(
+    Accuracy = cm$overall["Accuracy"],
+    Sensitivity = cm$byClass["Sensitivity"],
+    Specificity = cm$byClass["Specificity"]
+  )
+  return(as.numeric(metrics))
+}
+
+# Extract metrics from both models
+logit_core_chro <- extract_core_metrics(logit_cm_chro)
+rf_core_chro <- extract_core_metrics(rf_cm_chro)
+
+# Define metric names
+metric_names <- c("Accuracy", "Sensitivity", "Specificity")
+
+# Create comparison table
+comparison_core_chro <- data.frame(
+  Metric = metric_names,
+  Logistic = round(logit_core_chro, 4),
+  RandomForest = round(rf_core_chro, 4)
+)
+
+# Display comparison table
+print(comparison_core_chro)
+```
+
+### Interpretation
+
+**Logistic Regression**
+- Slightly better at identifying people without chronic disease (high Sensitivity)
+- Slightly better overall accuracy, but not significantly
+- Easier to interpret and explain
+
+**Random Forest**
+- Stronger at detecting people with chronic disease (higher Specificity)
+- Comparable overall accuracy
+- Can model nonlinear and complex patterns better
+
+While Logistic Regression offers greater interpretability and slightly more balanced performance, Random Forest may be preferred in scenarios where correctly identifying at-risk individuals (i.e., those with chronic disease) is prioritized. The choice between the two models should be guided by the specific objectives of the analysis—whether explanatory insight or predictive sensitivity to clinical risk is of greater importance.
+
+
+
+
+##  Comprehensive Interpretation and Discussion
+
+Our analysis of demographic factors and chronic disease prevalence reveals several key insights:
+
+### 1. Patterns of Chronic Disease Prevalence
+
+The analysis identified important patterns in chronic disease prevalence:
+- **Combined Chronic Conditions**: Many individuals experience multiple chronic conditions simultaneously
+- **Age-Related Patterns**: Strong positive association between age and chronic disease risk
+- **Regional Variations**: Significant differences in chronic disease prevalence across geographic regions
+- **Racial Disparities**: Varied chronic disease risk across different racial categories
+
+These relationships highlight the multifaceted nature of chronic disease risk factors in the population.
+
+### 2. Distinct Demographic Risk Profiles
+
+The logistic regression identified several key demographic factors associated with chronic disease:
+- **Age**: The strongest predictor, with older individuals showing significantly higher likelihood of chronic conditions
+- **Family Size**: Individuals from larger households demonstrated lower chronic disease prevalence
+- **Geographic Region**: Substantial regional differences in chronic disease risk, with Regions 2 and 3 showing elevated risk compared to Region 1
+- **Race**: Several racial categories showed significantly different risk profiles compared to the reference group
+
+These findings suggest that demographic factors combine to create distinct risk profiles for chronic disease development.
+
+### 3. Predictors of Chronic Disease
+
+The regression analysis revealed the relative importance of demographic factors:
+- **Age** showed the strongest association with chronic disease presence
+- **Family** size exhibited a negative relationship with chronic conditions
+- **Regional factors** played a significant role in determining chronic disease risk
+- **Race** was associated with varying levels of chronic disease prevalence
+- **Sex** was not found to be significantly associated with chronic disease risk
+
+The random forest model reinforced these findings while capturing more complex relationships between variables.
+
+### 4. Predictive Model Performance
+
+Our predictive models demonstrated strong performance in identifying individuals with chronic conditions:
+- **The logistic regression model** achieved high accuracy (81.8%) with excellent sensitivity for identifying those without chronic disease
+- **The random forest model** showed comparable accuracy (81.6%) with superior specificity for detecting individuals with chronic conditions
+- **Both models** demonstrated the critical role of age and race in determining chronic disease risk
+
+These findings suggest that demographic information alone can provide substantial predictive power for chronic disease risk assessment.
+
+### 5. Integrated Perspective
+
+When viewed holistically, our analyses suggest several important implications:
+- **Demographic patterns** matter: Rather than individual factors in isolation, combinations of demographic characteristics form distinct patterns with differential impacts on chronic disease risk.
+- **Age** is critical: Across all analyses, age consistently emerged as the most powerful predictor of chronic disease, suggesting it should be a focal point for prevention efforts.
+- **Regional differences** are meaningful: Geographic variations in chronic disease risk point to potential environmental, social, or healthcare access factors that warrant further investigation.
+- **Family context** is significant: The protective association with larger family size suggests potential social support mechanisms that could inform intervention strategies.
+- **Targeted approaches**: The identified demographic patterns could inform personalized approaches to chronic disease prevention, with different strategies for distinct population groups.
+
+### 6. Limitations and Future Directions
+
+This analysis has several limitations that should be addressed in future research:
+- **Cross-sectional design**: Our analysis cannot establish causal relationships between demographic factors and chronic disease
+- **Binary outcome measure**: Combining multiple chronic conditions into a single binary variable may obscure condition-specific patterns
+- **Limited variable set**: Other important factors (socioeconomic status, healthcare access, lifestyle behaviors) were not included
+- **Limited contextual information**: The mechanisms underlying the observed associations remain unexplored
+
+### Future research should:
+
+- Incorporate longitudinal designs to establish temporal relationships
+- Include a broader range of socioeconomic and behavioral variables
+- Explore interactions between demographic factors
+- Investigate condition-specific patterns for different chronic diseases
+- Examine mediating factors that explain demographic disparities
+
+### Conclusion
+This comprehensive analysis demonstrates that demographic factors significantly impact chronic disease prevalence. Age, family size, geographic region, and race combine in meaningful ways to create distinct risk profiles with differential health outcomes. By identifying these patterns and developing predictive models, we can move toward more personalized approaches to chronic disease prevention and management.
+
+
+--------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+# Research Question 3: Exploring the relationship between lifestyle factors, health behaviors, and psychological distress through multiple analytical approaches.
+
+This analysis explores the relationship between lifestyle factors, health behaviors, and psychological distress through multiple analytical approaches:
+
+1. Principal Component Analysis (PCA) to identify underlying patterns in lifestyle behaviors (excluding the outcome variable)
+2. Cluster analysis to identify distinct lifestyle pattern groups among individuals
+3. Regression modeling to examine how these lifestyle patterns predict psychological distress
+4. Classification methods to identify individuals at risk for high psychological distress
+
+
+## Data Preparation for Lifestyle Analysis
+
+```{r data_preparation_q3}
+# Define outcome variable
+outcome_var <- "K6SUM42"
+
+# Select lifestyle variables (excluding the outcome variable)
+lifestyle_vars <- c("PHYEXE53", "ADSLEEP42", "OFTSMK53", 
+                   "ADKALC42", "NOSMOK42", "ADNUMDRK42")
+
+# Create a dataframe with selected variables and outcome
+health_df <- meps_data %>%
+  dplyr::select(all_of(c(lifestyle_vars, outcome_var))) %>%
+  mutate(across(everything(), as.numeric))  # convert all to numeric
+
+# Transform negative values 
+health_df$PHYEXE53[health_df$PHYEXE53 < 0] <- 2
+health_df$ADSLEEP42[health_df$ADSLEEP42 < 0] <- 0
+health_df$K6SUM42[health_df$K6SUM42 < 0] <- 0
+health_df$OFTSMK53[health_df$OFTSMK53 < 0] <- 0
+health_df$ADKALC42[health_df$ADKALC42 < 0] <- 0
+health_df$NOSMOK42[health_df$NOSMOK42 < 0] <- 0
+health_df$ADNUMDRK42[health_df$ADNUMDRK42 < 0] <- 0
+
+# Remove rows with missing values
+health_df <- na.omit(health_df)
+
+# Create separate dataframes for lifestyle variables and outcome
+lifestyle_df <- health_df %>% dplyr::select(all_of(lifestyle_vars))
+outcome_df <- health_df %>% dplyr::select(all_of(outcome_var))
+
+# View the structure of the prepared data
+str(health_df)
+
+# Summary statistics
+summary(health_df)
+```
+
+## Part 1: Understanding Lifestyle Patterns using PCA
+
+In this section, we use Principal Component Analysis to identify underlying patterns in lifestyle behaviors, excluding the outcome variable.
+
+```{r pca_analysis_q3}
+# Scale lifestyle data for PCA (excluding outcome variable)
+lifestyle_df_scaled <- scale(lifestyle_df)
+
+# Implement PCA on lifestyle variables only
+pca_result <- prcomp(lifestyle_df_scaled, center = TRUE, scale. = TRUE)
+
+# Summary of PCA
+summary(pca_result)
+
+# View the loadings (rotation matrix)
+print(pca_result$rotation)
+```
+
+### Visualizing PCA Results
+
+```{r pca_visualizations_q3}
+# Create scree plot to determine number of components to retain
+fviz_eig(pca_result, addlabels = TRUE, ylim = c(0, 50))
+
+# Create PCA variable contribution biplot
+pca_var_plot <- fviz_pca_var(pca_result, col.var = "contrib",
+                 title = "PCA: Lifestyle Variables Factor Map",
+                 gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"))
+
+# Create PCA individuals plot
+pca_ind_plot <- fviz_pca_ind(pca_result, geom = "point", 
+                 col.ind = "cos2", pointsize = 2,
+                 title = "PCA: Individuals Factor Map")
+
+# Display plots side by side
+grid.arrange(pca_var_plot, pca_ind_plot, ncol = 2)
+```
+
+### Extracting Principal Components
+
+Based on the scree plot and eigenvalues, we'll retain the first 3 principal components, which explain a substantial portion of the variance.
+
+```{r extract_components_q3}
+# Extract PCA scores for each individual (first 3 components)
+pca_scores <- as.data.frame(pca_result$x[, 1:3])
+
+# Create a dataframe with PCA scores and outcome variable
+df_with_pca <- cbind(pca_scores, outcome_df)
+
+# Rename PCA columns for clarity
+names(df_with_pca)[1:3] <- c("Lifestyle_PC1", "Lifestyle_PC2", "Lifestyle_PC3")
+
+# View the first few rows
+head(df_with_pca)
+```
+
+### Interpretation of Principal Components
+
+```{r interpret_components_q3}
+# Create a table summarizing component loadings
+component_loadings <- as.data.frame(pca_result$rotation[, 1:3])
+component_loadings$Variable <- rownames(component_loadings)
+rownames(component_loadings) <- NULL
+
+# Create more descriptive variable labels
+var_labels <- c(
+  "PHYEXE53" = "Physical Exercise",
+  "ADSLEEP42" = "Sleep Quality",
+  "OFTSMK53" = "Smoking Frequency",
+  "ADKALC42" = "Alcohol Consumption", 
+  "NOSMOK42" = "Doctor Advised Against Smoking",
+  "ADNUMDRK42" = "Number of Drinks Per Day"
+)
+
+component_loadings$Variable_Label <- var_labels[component_loadings$Variable]
+
+# Present the table in a nice format
+print(component_loadings[, c("Variable_Label", "PC1", "PC2", "PC3")])
+```
+
+Based on the PCA loadings, we can interpret the principal components as follows:
+
+1. **PC1: "Substance Use and Health Advice"** - This component primarily represents patterns of substance use, with high values indicating frequent smoking, alcohol consumption, and having received advice against smoking.
+
+2. **PC2: "Physical Activity vs. Sedentary"** - This component contrasts physical activity with substance use behaviors, separating active individuals from those with more sedentary habits.
+
+3. **PC3: "Sleep and Activity Pattern"** - This component captures sleep quality and its relationship with physical activity, distinguishing between different patterns of rest and activity.
+
+## Part 2: Clustering Individuals Based on Lifestyle Patterns
+
+Now we'll use the identified PC scores to cluster individuals into distinct lifestyle pattern groups.
+
+```{r kmeans_clustering_q3}
+# Determine optimal number of clusters using elbow method
+set.seed(123)
+wss <- sapply(1:10, function(k) {
+  kmeans(pca_scores, centers = k, nstart = 25)$tot.withinss
+})
+
+# Plot elbow plot
+elbow_plot <- ggplot(data.frame(k = 1:10, wss = wss), aes(x = k, y = wss)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Number of Clusters", y = "Total Within-Cluster Sum of Squares",
+       title = "Elbow Method for Optimal k") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+print(elbow_plot)
+
+# Perform k-means clustering with optimal k
+k_optimal <- 4  # Based on elbow plot
+kmeans_result <- kmeans(pca_scores, centers = k_optimal, nstart = 25)
+
+# Add cluster assignments to our data
+df_with_clusters <- cbind(health_df, pca_scores, Cluster = as.factor(kmeans_result$cluster))
+```
+
+### Visualizing the Clusters
+
+```{r visualize_clusters_q3}
+# Plot clusters in PCA space
+cluster_plot <- fviz_cluster(kmeans_result, data = pca_scores,
+             palette = c("#2E9FDF", "#00AFBB", "#E7B800", "#FC4E07"),
+             ellipse.type = "convex",
+             title = "Lifestyle Pattern Clusters",
+             ggtheme = theme_minimal(),
+             geom = "point",
+             pointsize = 1, 
+             labelsize = 0) 
+             
+print(cluster_plot)
+
+# Analyze cluster characteristics using original variables
+cluster_characteristics <- df_with_clusters %>%
+  group_by(Cluster) %>%
+  summarize(across(all_of(c(lifestyle_vars, outcome_var)), ~ mean(.x, na.rm = TRUE)))
+
+# Present cluster characteristics in a nice table
+print(cluster_characteristics)
+```
+
+### Profiling the Clusters
+
+```{r profile_clusters_q3}
+# Create radar chart data for clusters (excluding outcome variable)
+radar_vars <- lifestyle_vars
+cluster_radar_data <- cluster_characteristics %>% 
+  dplyr::select(all_of(radar_vars)) %>%
+  as.data.frame()
+rownames(cluster_radar_data) <- paste("Cluster", 1:k_optimal)
+
+# Scale for radar chart
+cluster_radar_data_scaled <- scale(cluster_radar_data)
+
+# Reshape for plotting
+cluster_radar_long <- as.data.frame(t(cluster_radar_data_scaled))
+cluster_radar_long$Variable <- rownames(cluster_radar_long)
+cluster_radar_long_tidy <- tidyr::pivot_longer(cluster_radar_long, 
+                                      cols = -Variable, 
+                                      names_to = "Cluster", 
+                                      values_to = "Value")
+
+# Plot cluster profiles
+ggplot(cluster_radar_long_tidy, aes(x = Variable, y = Value, group = Cluster, color = Cluster)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  coord_polar() +
+  theme_minimal() +
+  labs(title = "Cluster Profiles Across Lifestyle Variables",
+       y = "Standardized Value") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 0))
+```
+
+### Analyzing Psychological Distress by Cluster
+
+```{r distress_by_cluster_q3}
+# Compare K6SUM42 across clusters
+cluster_distress <- df_with_clusters %>%
+  group_by(Cluster) %>%
+  summarize(
+    Mean_K6 = mean(K6SUM42),
+    SD_K6 = sd(K6SUM42),
+    Median_K6 = median(K6SUM42),
+    Count = n()
+  )
+
+# Present cluster distress in a nice table
+print(cluster_distress)
+
+# Create box plot of distress by cluster
+ggplot(df_with_clusters, aes(x = Cluster, y = K6SUM42, fill = Cluster)) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Set1") +
+  theme_minimal() +
+  labs(title = "Psychological Distress by Lifestyle Cluster",
+       x = "Lifestyle Cluster",
+       y = "K6 Psychological Distress Score") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "none")
+
+# ANOVA to test for significant differences
+anova_result <- aov(K6SUM42 ~ Cluster, data = df_with_clusters)
+summary(anova_result)
+
+# Post-hoc test
+TukeyHSD(anova_result)
+```
+
+Based on our cluster analysis, we can identify distinct lifestyle patterns:
+
+1. **Cluster 1: "Active, Low Substance Use"** - Characterized by high physical activity, good sleep quality, and minimal substance use.
+
+2. **Cluster 2: "Sedentary, Moderate Substance Use"** - Shows lower physical activity with moderate smoking and alcohol consumption.
+
+3. **Cluster 3: "Heavy Substance Users"** - Distinguished by high alcohol consumption and smoking frequency.
+
+4. **Cluster 4: "Poor Sleep Quality"** - Marked by poor sleep quality but moderate on other measures.
+
+The ANOVA results confirm significant differences in psychological distress levels across these clusters.
+
+## Part 3: Predicting Psychological Distress from Lifestyle Factors
+
+In this section, we explore how lifestyle factors and identified patterns predict psychological distress (K6SUM42).
+
+### Correlation Analysis
+
+```{r distress_correlations_q3}
+# Generate correlation analysis between lifestyle variables and distress
+cor_matrix <- cor(health_df)
+ggcorrplot(cor_matrix, 
+           hc.order = TRUE, 
+           type = "lower", 
+           lab = TRUE, 
+           lab_size = 3,
+           method="circle",
+           colors = c("#E63946", "#F1FAEE", "#1D3557"),
+           title="Correlation Matrix: Lifestyle Factors & Psychological Distress",
+           lab_col = "black",
+           ggtheme=theme_minimal() +
+             theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+                   axis.text.x = element_text(angle = 45, hjust = 1)))
+```
+
+### Linear Regression Models
+
+#### Model 1: Using Original Lifestyle Variables
+
+```{r linear_regression_q3}
+# Fit regression model using all original variables
+lm_model <- lm(K6SUM42 ~ ., data = health_df)
+
+# Generate summary of the model
+summary(lm_model)
+
+# Create detailed coefficient plot
+lm_df <- tidy(lm_model, conf.int = TRUE)
+lm_df$term <- gsub("\\(Intercept\\)", "Intercept", lm_df$term)
+lm_df$term <- factor(lm_df$term, levels = lm_df$term[order(lm_df$estimate)])
+
+# Generate nice labels for variables
+var_labels <- c(
+  "Intercept" = "Intercept",
+  "PHYEXE53" = "Physical Exercise",
+  "ADSLEEP42" = "Sleep Quality",
+  "OFTSMK53" = "Smoking Frequency",
+  "ADKALC42" = "Alcohol Consumption", 
+  "NOSMOK42" = "Doctor Advised Against Smoking",
+  "ADNUMDRK42" = "Number of Drinks Per Day"
+)
+
+lm_df$nice_label <- var_labels[lm_df$term]
+
+# Add significance indicators
+lm_df$significance <- ifelse(lm_df$p.value < 0.001, "***", 
+                       ifelse(lm_df$p.value < 0.01, "**",
+                       ifelse(lm_df$p.value < 0.05, "*", "ns")))
+
+# Create coefficient plot
+ggplot(lm_df, aes(x = nice_label, y = estimate)) +
+  geom_point(aes(color = significance), size = 3) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high, color = significance), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = c("***" = "#E63946", "**" = "#F4A261", "*" = "#2A9D8F", "ns" = "#A8DADC"),
+                     name = "p-value",
+                     labels = c("p < 0.001 (***)", "p < 0.01 (**)", "p < 0.05 (*)", "Not significant")) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Linear Regression Coefficients: Predicting Psychological Distress",
+       subtitle = "Positive values indicate factors associated with increased distress",
+       x = "", 
+       y = "Coefficient Estimate") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, color = "darkgray"))
+```
+
+#### Model 2: Using Principal Components
+
+```{r pc_regression_q3}
+# Fit regression using principal components
+pc_model <- lm(K6SUM42 ~ Lifestyle_PC1 + Lifestyle_PC2 + Lifestyle_PC3, 
+               data = df_with_pca)
+
+# Generate summary of PC regression
+summary(pc_model)
+
+# Create coefficient plot for PC regression
+pc_df <- tidy(pc_model, conf.int = TRUE)
+pc_df$term <- gsub("\\(Intercept\\)", "Intercept", pc_df$term)
+pc_df$term <- factor(pc_df$term, levels = pc_df$term[order(pc_df$estimate)])
+
+# Generate nice labels for principal components
+pc_labels <- c(
+  "Intercept" = "Intercept",
+  "Lifestyle_PC1" = "PC1: Substance Use and Health Advice",
+  "Lifestyle_PC2" = "PC2: Physical Activity vs. Sedentary",
+  "Lifestyle_PC3" = "PC3: Sleep and Activity Pattern"
+)
+
+pc_df$nice_label <- pc_labels[pc_df$term]
+
+# Add significance indicators
+pc_df$significance <- ifelse(pc_df$p.value < 0.001, "***", 
+                       ifelse(pc_df$p.value < 0.01, "**",
+                       ifelse(pc_df$p.value < 0.05, "*", "ns")))
+
+# Create coefficient plot
+ggplot(pc_df, aes(x = nice_label, y = estimate)) +
+  geom_point(aes(color = significance), size = 3) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high, color = significance), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = c("***" = "#E63946", "**" = "#F4A261", "*" = "#2A9D8F", "ns" = "#A8DADC"),
+                     name = "p-value",
+                     labels = c("p < 0.001 (***)", "p < 0.01 (**)", "p < 0.05 (*)", "Not significant")) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Principal Component Regression: Predicting Psychological Distress",
+       subtitle = "Coefficients of principal components",
+       x = "", 
+       y = "Coefficient Estimate") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, color = "darkgray"))
+```
+
+#### Model 3: Using Cluster Membership
+
+```{r cluster_membership_q3}
+# Fit regression using cluster membership
+cluster_model <- lm(K6SUM42 ~ Cluster, data = df_with_clusters)
+
+# Generate summary of cluster regression
+summary(cluster_model)
+
+# ANOVA to confirm cluster significance
+anova(cluster_model)
+```
+
+## Part 4: Classification of High Psychological Distress
+
+In this section, we develop models to identify individuals at risk for high psychological distress.
+
+```{r create_binary_outcome_q3}
+# Create binary outcome: high distress (top quartile) vs. low distress
+distress_threshold <- quantile(health_df$K6SUM42, 0.75)
+health_df$high_distress <- ifelse(health_df$K6SUM42 > distress_threshold, 1, 0)
+health_df$high_distress <- as.factor(health_df$high_distress)
+
+# Check class distribution
+table(health_df$high_distress)
+```
+
+### Train-Test Split (BEFORE any transformations)
+
+```{r train_test_split_q3}
+set.seed(123)
+train_index <- createDataPartition(health_df$high_distress, p = 0.7, list = FALSE)
+train_data <- health_df[train_index, ]
+test_data <- health_df[-train_index, ]
+```
+
+
+### Apply PCA on training data only
+
+```{r}
+# Scale lifestyle variables in training data
+train_lifestyle <- train_data %>% dplyr::select(all_of(lifestyle_vars))
+train_lifestyle_scaled <- scale(train_lifestyle)
+
+# Fit PCA on training data
+pca_train <- prcomp(train_lifestyle_scaled, center = TRUE, scale. = TRUE)
+
+# Extract PC scores for training data (first 3 components)
+train_pc_scores <- as.data.frame(pca_train$x[, 1:3])
+colnames(train_pc_scores) <- c("PC1", "PC2", "PC3")
+
+# Now transform test data using PCA parameters from training
+test_lifestyle <- test_data %>% dplyr::select(all_of(lifestyle_vars))
+# We need to scale test data using parameters from training data
+test_lifestyle_scaled <- scale(test_lifestyle, 
+                              center = attr(train_lifestyle_scaled, "scaled:center"),
+                              scale = attr(train_lifestyle_scaled, "scaled:scale"))
+
+# Apply PCA transformation to test data
+test_pc_scores <- as.data.frame(predict(pca_train, test_lifestyle_scaled)[, 1:3])
+colnames(test_pc_scores) <- c("PC1", "PC2", "PC3")
+```
+
+
+### Apply clustering on training data only
+
+```{r}
+set.seed(123)
+# Use optimal k determined earlier (k=4)
+k_optimal <- 4
+kmeans_train <- kmeans(train_pc_scores, centers = k_optimal, nstart = 25)
+
+# Assign training data to clusters
+train_data$Cluster <- as.factor(kmeans_train$cluster)
+
+# Assign test data to clusters based on training centroids
+# Calculate distances to each centroid
+distances <- matrix(0, nrow = nrow(test_pc_scores), ncol = k_optimal)
+for (i in 1:k_optimal) {
+  centroid <- kmeans_train$centers[i, ]
+  # Calculate Euclidean distance to each centroid
+  distances[, i] <- sqrt(rowSums((test_pc_scores - centroid)^2))
+}
+# Assign each test point to nearest centroid
+test_data$Cluster <- as.factor(max.col(-distances))
+
+# Add PC scores to train and test data
+train_data <- cbind(train_data, train_pc_scores)
+test_data <- cbind(test_data, test_pc_scores)
+```
+
+
+### Visualizing Variable Distributions
+
+```{r}
+# Check distributions of dependent variable in train and test sets
+train_dist <- train_data %>%
+  dplyr::select(K6SUM42) %>%
+  mutate(Dataset = "Training")
+
+test_dist <- test_data %>%
+  dplyr::select(K6SUM42) %>%
+  mutate(Dataset = "Testing")
+
+# Combine for plotting (avoiding duplicate names error)
+combined_dist <- bind_rows(train_dist, test_dist)
+
+# Create distribution plot
+ggplot(combined_dist, aes(x = K6SUM42, fill = Dataset)) +
+  geom_density(alpha = 0.6) +
+  scale_fill_manual(values = c("Training" = "#457B9D", "Testing" = "#E63946")) +
+  theme_minimal() +
+  labs(title = "Distribution of Psychological Distress Scores",
+       subtitle = "Comparing Training and Test Datasets",
+       x = "K6SUM42 (Psychological Distress Score)",
+       y = "Density") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, color = "darkgray"))
+
+# Visualize binary outcome distribution
+binary_dist <- data.frame(
+  Dataset = c("Training", "Testing"),
+  Low_Distress = c(sum(train_data$high_distress == 0), 
+                   sum(test_data$high_distress == 0)),
+  High_Distress = c(sum(train_data$high_distress == 1), 
+                    sum(test_data$high_distress == 1))
+)
+
+# Reshape for plotting
+binary_dist_long <- binary_dist %>%
+  pivot_longer(cols = c(Low_Distress, High_Distress),
+               names_to = "Distress_Level",
+               values_to = "Count")
+
+# Create bar plot of binary outcome
+ggplot(binary_dist_long, aes(x = Dataset, y = Count, fill = Distress_Level)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = c("Low_Distress" = "#A8DADC", 
+                               "High_Distress" = "#E63946")) +
+  theme_minimal() +
+  labs(title = "Distribution of Binary Distress Outcome",
+       subtitle = "Comparing Training and Test Datasets",
+       x = "",
+       y = "Count",
+       fill = "Distress Level") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, color = "darkgray"))
+```
+- A **density plot** showing the distribution of the K6SUM42 scores in both training and test sets
+- A **bar chart** showing the distribution of the binary high_distress outcome in both datasets
+
+
+
+#### 1. Logistic Regression Model (original variables)
+
+```{r logistic_regression_q3}
+# Model using original variables
+logit_model <- glm(high_distress ~ PHYEXE53 + ADSLEEP42 + OFTSMK53 + ADKALC42 + 
+                    NOSMOK42 + ADNUMDRK42, 
+                  data = train_data, family = "binomial")
+
+# Summary of logistic regression
+summary(logit_model)
+
+# Predictions
+logit_pred_prob <- predict(logit_model, newdata = test_data, type = "response")
+logit_pred_class <- ifelse(logit_pred_prob > 0.5, 1, 0)
+
+# Confusion matrix
+logit_conf <- confusionMatrix(as.factor(logit_pred_class), test_data$high_distress)
+print(logit_conf)
+
+# ROC curve
+roc_logit <- roc(test_data$high_distress, logit_pred_prob)
+auc_logit <- auc(roc_logit)
+```
+
+Accuracy: 0.8457
+Sensitivity: 0.9368
+Specificity: 0.4605
+
+The logistic regression model demonstrated strong classification performance on the test dataset. The overall accuracy was 84.6%, meaning that 84.6% of all predictions matched the true high distress status.
+
+The model treated "0" (i.e., "low psychological distress") as the positive class. Based on this:
+- Sensitivity was 93.7%, indicating that the model correctly identified 93.7% of the people with low psychological distress.
+- Specificity was 46.1%, showing that the model correctly predicted 46.1% of those who actually had high psychological distress.
+
+
+#### 2. Random Forest Model
+
+```{r random_forest_q3}
+# Random Forest model
+set.seed(123)
+rf_model <- randomForest(high_distress ~ PHYEXE53 + ADSLEEP42 + OFTSMK53 + ADKALC42 + 
+                           NOSMOK42 + ADNUMDRK42,
+                        data = train_data, ntree = 500, importance = TRUE)
+
+# Model performance on test data
+rf_pred_prob <- predict(rf_model, newdata = test_data, type = "prob")[,2]
+rf_pred_class <- predict(rf_model, newdata = test_data, type = "class")
+
+# Confusion matrix
+rf_conf <- confusionMatrix(rf_pred_class, test_data$high_distress)
+print(rf_conf)
+
+# ROC curve
+roc_rf <- roc(test_data$high_distress, rf_pred_prob)
+auc_rf <- auc(roc_rf)
+
+# Variable importance
+varImpPlot(rf_model, main = "Variable Importance: Random Forest Model", 
+           cex = 1.2, col = "#457B9D")
+```
+
+Accuracy: 0.8445
+Sensitivity: 0.9121
+Specificity: 0.5589
+
+The random forest model demonstrated strong classification performance on the test dataset. The overall accuracy was 84.5%, meaning that 84.5% of all predictions matched the true high distress status.
+
+The model treated "0" (i.e., "low psychological distress") as the positive class. Based on this:
+- Sensitivity was 91.2%, indicating that the model correctly identified 91.2% of the people with low psychological distress.
+- Specificity was 55.9%, showing that the model correctly predicted 55.9% of those who actually had high psychological distress.
+
+
+#### 3. PCA-Based Model
+
+```{r pca_based_model_q3}
+# Model using principal components
+logit_pc_model <- glm(high_distress ~ PC1 + PC2 + PC3, 
+                    data = train_data, family = "binomial")
+
+# Summary
+summary(logit_pc_model)
+
+# Predictions
+logit_pc_pred_prob <- predict(logit_pc_model, newdata = test_data, type = "response")
+logit_pc_pred_class <- ifelse(logit_pc_pred_prob > 0.5, 1, 0)
+
+# Confusion matrix
+logit_pc_conf <- confusionMatrix(as.factor(logit_pc_pred_class), test_data$high_distress)
+print(logit_pc_conf)
+
+# ROC curve
+roc_logit_pc <- roc(test_data$high_distress, logit_pc_pred_prob)
+auc_logit_pc <- auc(roc_logit_pc)
+```
+
+Accuracy: 0.8295
+Sensitivity: 0.9386
+Specificity: 0.3684
+
+The PCA-based logistic model demonstrated strong classification performance on the test dataset. The overall accuracy was 83.0%, meaning that 83.0% of all predictions matched the true high distress status.
+
+The model treated "0" (i.e., "low psychological distress") as the positive class. Based on this:
+- Sensitivity was 93.9%, indicating that the model correctly identified 93.9% of the people with low psychological distress.
+- Specificity was 36.8%, showing that the model correctly predicted 36.8% of those who actually had high psychological distress.
+
+
+#### 4. Cluster-Based Model
+
+```{r cluster_based_model_q3}
+# Model using cluster membership
+logit_cluster_model <- glm(high_distress ~ Cluster, 
+                         data = train_data, family = "binomial")
+
+# Summary
+summary(logit_cluster_model)
+
+# Predictions
+logit_cluster_pred_prob <- predict(logit_cluster_model, newdata = test_data, type = "response")
+logit_cluster_pred_class <- ifelse(logit_cluster_pred_prob > 0.5, 1, 0)
+
+# Confusion matrix
+logit_cluster_conf <- confusionMatrix(as.factor(logit_cluster_pred_class), test_data$high_distress)
+print(logit_cluster_conf)
+
+# ROC curve
+roc_logit_cluster <- roc(test_data$high_distress, logit_cluster_pred_prob)
+auc_logit_cluster <- auc(roc_logit_cluster)
+```
+
+Accuracy: 0.8086
+Sensitivity: 1.0000
+Specificity: 0.0000
+
+The cluster-based logistic model demonstrated strong classification performance on the test dataset. The overall accuracy was 80.9%, meaning that 80.9% of all predictions matched the true high distress status.
+
+The model treated "0" (i.e., "low psychological distress") as the positive class. Based on this:
+- Sensitivity was 100.0%, indicating that the model correctly identified 100.0% of the people with low psychological distress.
+- Specificity was 0.0%, showing that the model failed to correctly predict any of those who actually had high psychological distress.
+
+
+### Comparing Models
+
+```{r model_comparison_q3}
+# Create ROC curve comparison
+roc_data <- data.frame(
+  Specificity = c(1-roc_logit$specificities, 
+                  1-roc_rf$specificities,
+                  1-roc_logit_pc$specificities,
+                  1-roc_logit_cluster$specificities),
+  Sensitivity = c(roc_logit$sensitivities, 
+                  roc_rf$sensitivities,
+                  roc_logit_pc$sensitivities,
+                  roc_logit_cluster$sensitivities),
+  Model = c(rep("Logistic Regression", length(roc_logit$specificities)), 
+            rep("Random Forest", length(roc_rf$specificities)), 
+            rep("PCA-Logistic", length(roc_logit_pc$specificities)),
+            rep("Cluster-Logistic", length(roc_logit_cluster$specificities)))
+)
+
+# Define the order you want in the legend
+legend_order <- c("Logistic Regression", "Random Forest", "PCA-Logistic", "Cluster-Logistic")
+
+# Convert Model to a factor with specific order
+roc_data$Model <- factor(roc_data$Model, levels = legend_order)
+
+# Now create the plot with the ordered legend
+ggplot(roc_data, aes(x = Specificity, y = Sensitivity, color = Model)) +
+  geom_line(size = 1.2) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = c("Logistic Regression" = "#E63946", 
+                                "Random Forest" = "#457B9D",
+                                "PCA-Logistic" = "#2A9D8F",
+                                "Cluster-Logistic" = "#F4A261")) +
+  coord_equal() +
+  theme_minimal() +
+  labs(title = "ROC Curves: Model Comparison",
+       subtitle = paste("Logistic AUC:", round(auc_logit, 3), 
+                        "| RF AUC:", round(auc_rf, 3),
+                        "| PC-Logistic AUC:", round(auc_logit_pc, 3),
+                        "| Cluster-Logistic AUC:", round(auc_logit_cluster, 3)),
+       x = "1 - Specificity (False Positive Rate)",
+       y = "Sensitivity (True Positive Rate)") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 8, color = "darkgray"),
+        legend.position = c(0.85, 0.25),
+        legend.background = element_rect(fill = "white", color = NA))
+
+# Model performance comparison table
+model_comparison <- data.frame(
+  Model = c("Logistic Regression", "Random Forest", "PC-Logistic", "Cluster-Logistic"),
+  AUC = c(auc_logit, auc_rf, auc_logit_pc, auc_logit_cluster),
+  Accuracy = c(logit_conf$overall["Accuracy"], 
+               rf_conf$overall["Accuracy"],
+               logit_pc_conf$overall["Accuracy"],
+               logit_cluster_conf$overall["Accuracy"]),
+  Sensitivity = c(logit_conf$byClass["Sensitivity"], 
+                  rf_conf$byClass["Sensitivity"],
+                  logit_pc_conf$byClass["Sensitivity"],
+                  logit_cluster_conf$byClass["Sensitivity"]),
+  Specificity = c(logit_conf$byClass["Specificity"], 
+                  rf_conf$byClass["Specificity"],
+                  logit_pc_conf$byClass["Specificity"],
+                  logit_cluster_conf$byClass["Specificity"])
+)
+
+# Present model comparison in a nice table
+print(model_comparison)
+```
+
+## Comprehensive Interpretation and Discussion
+
+Our comprehensive analysis of lifestyle patterns and psychological distress reveals several key insights:
+
+### 1. Underlying Lifestyle Patterns
+
+The PCA identified three main lifestyle dimensions:
+- **Substance Use and Health Advice**: Capturing patterns of substance use behaviors
+- **Physical Activity vs. Sedentary**: Contrasting active lifestyles with more sedentary behaviors
+- **Sleep and Activity Pattern**: Identifying relationships between sleep quality and physical activity
+
+These dimensions explain approximately 65% of the variance in lifestyle behaviors, suggesting they capture the major patterns in the data.
+
+### 2. Distinct Lifestyle Clusters
+
+K-means clustering identified four distinct lifestyle profiles:
+- **Active, Low Substance Use Cluster**: Characterized by high physical activity and minimal substance use
+- **Sedentary, Moderate Substance Use Cluster**: Lower physical activity with moderate substance use
+- **Heavy Substance Users Cluster**: Distinguished by higher alcohol and tobacco use
+- **Poor Sleep Quality Cluster**: Marked by sleep difficulties but moderate on other measures
+
+ANOVA results confirm significant differences in psychological distress levels across these clusters.
+
+### 3. Predictors of Psychological Distress
+
+The regression analysis identified the most important factors associated with psychological distress:
+- **Sleep quality** showed the strongest association with distress levels
+- **Physical activity** exhibited a negative relationship with distress
+- **Substance use behaviors**, particularly smoking frequency, were positively associated with psychological distress
+
+The principal component regression further reinforced that the "Sleep and Activity Pattern" component was most strongly related to psychological distress outcomes, followed by the "Substance Use" component.
+
+
+### 4. Predictive Model Performance
+
+Our analysis compared four different approaches for classifying individuals at risk for high psychological distress, with the following results:
+- **The Logistic Regression model** using original variables demonstrated good accuracy (84.6%) and high sensitivity (93.7%), but moderate specificity (46.1%). With balanced accuracy of 69.9%, this model provides a useful baseline for predicting psychological distress risk.
+- **The Random Forest model** achieved the strongest overall performance with accuracy of 84.5%, sensitivity of 91.2%, and notably higher specificity (55.9%) compared to other models. With a balanced accuracy of 73.6% and kappa of 0.484, this model offered the best discrimination between high and low distress groups.
+- **The PCA-based Logistic model** performed reasonably well with 83.0% accuracy and very high sensitivity (93.9%), though with lower specificity (36.8%). This approach suggests that dimension reduction preserves much of the predictive signal while simplifying the feature space.
+- **The Cluster-based Logistic model** showed limited discriminative ability with 80.9% accuracy but perfect sensitivity (100%) and zero specificity (0%). This pattern indicates the model essentially classified all individuals as the majority class, suggesting that while lifestyle clusters are associated with psychological distress, they alone are insufficient for precise individual classification.
+
+These findings highlight that machine learning approaches, particularly Random Forest, offer improved predictive performance compared to simpler models. The strong performance of the original variable models suggests that sleep quality and physical activity are directly important for prediction, rather than requiring transformation through PCA or clustering to extract useful signals.
+
+
+### 5. Integrated Perspective
+
+When viewed holistically, our analyses suggest several important implications:
+- **Lifestyle patterns matter**: Rather than individual behaviors in isolation, combinations of behaviors form distinct patterns with differential impacts on mental health.
+- **Sleep is critical**: Across all analyses, sleep quality consistently emerged as a powerful predictor of psychological well-being, suggesting it may be a crucial intervention target.
+- **Physical activity as a protective factor**: Regular exercise appears to buffer against psychological distress, independent of other lifestyle behaviors.
+- **Targeted interventions**: The identified clusters and predictive models could inform personalized approaches to mental health promotion, with different strategies for distinct lifestyle groups.
+
+### 6. Limitations and Future Directions
+
+This analysis has several limitations that should be addressed in future research:
+- **Cross-sectional design**: Our analysis cannot establish causal relationships between lifestyle patterns and psychological distress
+- **Self-reported measures**: All variables rely on self-report, which may introduce bias
+- **Limited variable set**: Other important lifestyle factors (diet, social interaction, screen time) were not included
+- **Model complexity**: While our models show reasonable predictive power, more sophisticated approaches could improve performance
+
+### Future research should:
+
+- Incorporate longitudinal designs to establish causal directions
+- Include a broader range of lifestyle variables
+- Explore interactions between lifestyle patterns and demographic factors
+- Test tailored interventions based on identified lifestyle clusters
+
+### Conclusion
+This comprehensive analysis demonstrates that lifestyle patterns significantly impact psychological distress. Sleep quality, physical activity, and substance use behaviors combine in meaningful ways to create distinct lifestyle profiles with differential mental health risks. By identifying these patterns and developing predictive models, we can move toward more personalized approaches to mental health promotion and prevention.
